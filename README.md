@@ -1,1 +1,1 @@
-# CSC480
+# CSC480 Poker Solver
