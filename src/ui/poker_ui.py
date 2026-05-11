@@ -1,600 +1,291 @@
 """
 ui/poker_ui.py
 --------------
-Pygame-based renderer for a PyPokerEngine game.
+Simple pygame poker table display.
 
-Displays:
-  - Community cards (flop / turn / river)
-  - Each player's hole cards (face-up for human, face-down for bots)
-  - Pot size, player stacks, current street
-  - Hand strength + equity bars (for the human player)
-  - Action log (last N actions)
-  - Action buttons: Fold / Call / Raise  (used by HumanAgent)
+The only thing this file does is draw the current game state.
+It knows nothing about agents or game logic.
 
-Usage (standalone demo):
-    python -m src.ui.poker_ui
+Usage:
+    ui = PokerUI()
+    ui.update(hole_cards, community_cards, seats, pot, street, round_num)
+    ui.draw()
+
+    # When it's a human's turn, show buttons and wait for a click:
+    action = ui.ask_human(valid_actions)   # returns ("fold"|"call"|"raise", amount)
 """
 
-import sys
-import threading
 import pygame
 
-# ── Colour palette ────────────────────────────────────────────────────────────
-BG          = (  7,  99,  36)   # felt green
-CARD_WHITE  = (255, 255, 255)
-CARD_BACK   = ( 30,  60, 150)
-RED         = (200,  30,  30)
-BLACK       = ( 20,  20,  20)
+# ── Colours ───────────────────────────────────────────────────────────────────
+GREEN       = (  7,  99,  36)   # felt
+DARK_GREEN  = ( 10,  70,  25)   # table oval
 GOLD        = (212, 175,  55)
-CHIP_YELLOW = (240, 200,  50)
-TEXT_LIGHT  = (230, 230, 230)
-TEXT_DIM    = (160, 160, 160)
-BTN_FOLD    = (180,  40,  40)
-BTN_CALL    = ( 40, 140,  40)
-BTN_RAISE   = ( 40,  80, 180)
-BTN_HOVER   = (255, 255, 255, 60)
-BAR_BG      = ( 50,  50,  50)
-BAR_GREEN   = ( 50, 200,  80)
-BAR_BLUE    = ( 50, 120, 220)
-PANEL_BG    = (  0,   0,   0, 140)
+WHITE       = (255, 255, 255)
+BLACK       = ( 20,  20,  20)
+RED         = (200,  30,  30)
+GREY        = (160, 160, 160)
+DARK_GREY   = ( 50,  50,  50)
+CARD_BACK   = ( 30,  60, 150)
+YELLOW      = (240, 200,  50)
 
-# ── Layout constants ──────────────────────────────────────────────────────────
-WIN_W, WIN_H = 1100, 720
-CARD_W, CARD_H = 60, 88
-CARD_RADIUS    = 6
-FONT_LARGE     = 28
-FONT_MED       = 20
-FONT_SMALL     = 15
+# ── Sizes ─────────────────────────────────────────────────────────────────────
+W, H       = 900, 600
+CARD_W     = 56
+CARD_H     = 80
 
-SUIT_SYMBOLS = {'S': '♠', 'H': '♥', 'D': '♦', 'C': '♣'}
-SUIT_COLORS  = {'S': BLACK, 'H': RED, 'D': RED, 'C': BLACK}
+# Card suit display helpers
+SUITS  = {'S': ('♠', BLACK), 'H': ('♥', RED), 'D': ('♦', RED), 'C': ('♣', BLACK)}
+RANKS  = {'T': '10', 'J': 'J', 'Q': 'Q', 'K': 'K', 'A': 'A'}   # rest are digits
 
-RANK_DISPLAY = {
-    '2': '2', '3': '3', '4': '4', '5': '5', '6': '6',
-    '7': '7', '8': '8', '9': '9', 'T': '10',
-    'J': 'J', 'Q': 'Q', 'K': 'K', 'A': 'A',
-}
-
-STREET_LABELS = {
-    'preflop': 'PRE-FLOP',
-    'flop':    'FLOP',
-    'turn':    'TURN',
-    'river':   'RIVER',
-    'showdown':'SHOWDOWN',
-}
-
-
-# ── Card drawing ──────────────────────────────────────────────────────────────
-
-def _draw_card(surface, x, y, card_str, font_big, font_small, face_up=True):
-    """Draw a single card at (x, y). card_str e.g. 'CA', 'H9'."""
-    rect = pygame.Rect(x, y, CARD_W, CARD_H)
-
-    if not face_up:
-        # Card back
-        pygame.draw.rect(surface, CARD_BACK, rect, border_radius=CARD_RADIUS)
-        pygame.draw.rect(surface, GOLD, rect, 2, border_radius=CARD_RADIUS)
-        # Simple pattern
-        inner = rect.inflate(-8, -8)
-        pygame.draw.rect(surface, (20, 40, 120), inner, border_radius=4)
-        return
-
-    # Card face
-    pygame.draw.rect(surface, CARD_WHITE, rect, border_radius=CARD_RADIUS)
-    pygame.draw.rect(surface, (180, 180, 180), rect, 1, border_radius=CARD_RADIUS)
-
-    suit_char = card_str[0].upper()
-    rank_char = card_str[1].upper()
-    symbol    = SUIT_SYMBOLS.get(suit_char, suit_char)
-    rank_txt  = RANK_DISPLAY.get(rank_char, rank_char)
-    color     = SUIT_COLORS.get(suit_char, BLACK)
-
-    # Top-left rank + suit
-    r_surf = font_small.render(rank_txt, True, color)
-    s_surf = font_small.render(symbol,   True, color)
-    surface.blit(r_surf, (x + 4, y + 3))
-    surface.blit(s_surf, (x + 4, y + 3 + r_surf.get_height()))
-
-    # Centre big suit symbol
-    big_sym = font_big.render(symbol, True, color)
-    cx = x + CARD_W // 2 - big_sym.get_width() // 2
-    cy = y + CARD_H // 2 - big_sym.get_height() // 2
-    surface.blit(big_sym, (cx, cy))
-
-    # Bottom-right (rotated) rank + suit — simulated by mirroring
-    r2 = font_small.render(rank_txt, True, color)
-    s2 = font_small.render(symbol,   True, color)
-    surface.blit(r2, (x + CARD_W - r2.get_width() - 4,
-                      y + CARD_H - r2.get_height() - s2.get_height() - 3))
-    surface.blit(s2, (x + CARD_W - s2.get_width() - 4,
-                      y + CARD_H - s2.get_height() - 3))
-
-
-def _draw_card_placeholder(surface, x, y):
-    """Draw an empty card slot."""
-    rect = pygame.Rect(x, y, CARD_W, CARD_H)
-    pygame.draw.rect(surface, (30, 80, 50), rect, border_radius=CARD_RADIUS)
-    pygame.draw.rect(surface, (60, 110, 70), rect, 1, border_radius=CARD_RADIUS)
-
-
-# ── Bar drawing ───────────────────────────────────────────────────────────────
-
-def _draw_bar(surface, x, y, w, h, value, color, label, font):
-    pygame.draw.rect(surface, BAR_BG, (x, y, w, h), border_radius=3)
-    fill_w = int(w * max(0.0, min(1.0, value)))
-    if fill_w > 0:
-        pygame.draw.rect(surface, color, (x, y, fill_w, h), border_radius=3)
-    lbl = font.render(f"{label}: {value*100:.0f}%", True, TEXT_LIGHT)
-    surface.blit(lbl, (x, y - lbl.get_height() - 2))
-
-
-# ── Button ────────────────────────────────────────────────────────────────────
-
-class Button:
-    def __init__(self, rect, label, color, font):
-        self.rect  = pygame.Rect(rect)
-        self.label = label
-        self.color = color
-        self.font  = font
-        self.hovered = False
-
-    def draw(self, surface):
-        c = tuple(min(v + 30, 255) for v in self.color) if self.hovered else self.color
-        pygame.draw.rect(surface, c, self.rect, border_radius=8)
-        pygame.draw.rect(surface, GOLD, self.rect, 2, border_radius=8)
-        txt = self.font.render(self.label, True, CARD_WHITE)
-        surface.blit(txt, txt.get_rect(center=self.rect.center))
-
-    def handle_event(self, event):
-        if event.type == pygame.MOUSEMOTION:
-            self.hovered = self.rect.collidepoint(event.pos)
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self.rect.collidepoint(event.pos):
-                return True
-        return False
-
-
-# ── Main UI class ─────────────────────────────────────────────────────────────
 
 class PokerUI:
     """
-    Pygame poker table renderer.
+    Dead-simple poker table renderer.
 
-    Thread-safe: game logic runs in its own thread; the UI runs on the main
-    thread (required by pygame / macOS).  Use `set_state()` to push updates
-    from the game thread, and `wait_for_action()` to block the game thread
-    until the human clicks a button.
+    Call update() to push new state, then draw() each frame.
+    Call ask_human() when you need a human decision.
     """
 
-    def __init__(self, title="Poker — PyPokerEngine"):
+    def __init__(self, title="Poker"):
         pygame.init()
+        self.screen = pygame.display.set_mode((W, H))
         pygame.display.set_caption(title)
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
         self.clock  = pygame.time.Clock()
 
-        # Fonts
-        self.font_lg  = pygame.font.SysFont("Arial", FONT_LARGE,  bold=True)
-        self.font_med = pygame.font.SysFont("Arial", FONT_MED)
-        self.font_sm  = pygame.font.SysFont("Arial", FONT_SMALL)
-        self.font_card_big   = pygame.font.SysFont("Arial", 30, bold=True)
-        self.font_card_small = pygame.font.SysFont("Arial", 13, bold=True)
+        self.font_lg  = pygame.font.SysFont("Arial", 26, bold=True)
+        self.font_med = pygame.font.SysFont("Arial", 18)
+        self.font_sm  = pygame.font.SysFont("Arial", 14)
 
-        # Game state (updated by set_state)
-        self._state_lock   = threading.Lock()
-        self._game_state   = {}          # latest round_state dict
-        self._hole_cards   = []          # human's hole cards
-        self._community    = []          # community cards
-        self._street       = "preflop"
-        self._pot          = 0
-        self._seats        = []          # list of seat dicts
-        self._hand_strength = 0.5
-        self._equity        = 0.5
-        self._action_log    = []         # list of strings
-        self._valid_actions = []
-        self._human_uuid    = None
-        self._round_count   = 0
-        self._winner_msg    = ""
+        # State — set by update()
+        self.hole_cards  = []
+        self.community   = []
+        self.seats       = []
+        self.pot         = 0
+        self.street      = "preflop"
+        self.round_num   = 0
+        self.log         = []          # list of action strings
 
-        # Action result (set when human clicks a button)
-        self._action_event  = threading.Event()
-        self._chosen_action = None       # ("fold"|"call"|"raise", amount)
-        self._waiting       = False      # True while waiting for human input
-        self._raise_amount  = 0
-        self._raise_min     = 0
-        self._raise_max     = 0
+    # ── Public API ────────────────────────────────────────────────────────────
 
-        # Buttons
-        bw, bh = 140, 48
-        by = WIN_H - 70
-        self._btn_fold  = Button((WIN_W//2 - bw*2 - 20, by, bw, bh), "FOLD",  BTN_FOLD,  self.font_med)
-        self._btn_call  = Button((WIN_W//2 - bw//2,     by, bw, bh), "CALL",  BTN_CALL,  self.font_med)
-        self._btn_raise = Button((WIN_W//2 + bw + 20,   by, bw, bh), "RAISE", BTN_RAISE, self.font_med)
+    def update(self, hole_cards, community_cards, seats, pot, street, round_num):
+        """Push the latest game state. Call this whenever something changes."""
+        self.hole_cards = hole_cards
+        self.community  = community_cards
+        self.seats      = seats
+        self.pot        = pot
+        self.street     = street
+        self.round_num  = round_num
 
-        self._running = True
+    def log_action(self, message):
+        """Add a line to the on-screen action log (last 8 shown)."""
+        self.log.append(message)
+        if len(self.log) > 8:
+            self.log.pop(0)
 
-    # ── Public API (called from game thread) ──────────────────────────────────
+    def draw(self):
+        """Render one frame. Call this in your game loop."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                raise SystemExit
 
-    def set_state(
-        self,
-        round_state: dict,
-        hole_cards: list,
-        hand_strength: float = 0.5,
-        equity: float = 0.5,
-        human_uuid: str = None,
-        valid_actions: list = None,
-        raise_min: int = 0,
-        raise_max: int = 0,
-    ):
-        """Push a new game state to the renderer. Thread-safe."""
-        with self._state_lock:
-            self._game_state    = round_state
-            self._hole_cards    = hole_cards or []
-            self._community     = round_state.get("community_card", [])
-            self._street        = round_state.get("street", "preflop")
-            self._pot           = round_state.get("pot", {}).get("main", {}).get("amount", 0)
-            self._seats         = round_state.get("seats", [])
-            self._hand_strength = hand_strength
-            self._equity        = equity
-            self._round_count   = round_state.get("round_count", 0)
-            if human_uuid is not None:
-                self._human_uuid = human_uuid
-            if valid_actions is not None:
-                self._valid_actions = valid_actions
-                self._raise_min = raise_min
-                self._raise_max = raise_max
-                self._raise_amount = raise_min
+        self.screen.fill(GREEN)
+        self._draw_table()
+        self._draw_community()
+        self._draw_pot()
+        self._draw_players()
+        self._draw_log()
+        self._draw_street()
+        pygame.display.flip()
+        self.clock.tick(30)
 
-    def add_action_log(self, message: str):
-        """Append a line to the action log. Thread-safe."""
-        with self._state_lock:
-            self._action_log.append(message)
-            if len(self._action_log) > 12:
-                self._action_log.pop(0)
-
-    def set_winner(self, message: str):
-        """Display a winner banner. Thread-safe."""
-        with self._state_lock:
-            self._winner_msg = message
-
-    def wait_for_action(self) -> tuple:
+    def ask_human(self, valid_actions):
         """
-        Block the calling (game) thread until the human clicks a button.
+        Show Fold / Call / Raise buttons and block until the human clicks one.
         Returns (action_str, amount).
+
+        valid_actions format (from PyPokerEngine):
+            [
+              {"action": "fold",  "amount": 0},
+              {"action": "call",  "amount": 10},
+              {"action": "raise", "amount": {"min": 20, "max": 200}},
+            ]
         """
-        self._action_event.clear()
-        self._waiting = True
-        self._action_event.wait()
-        self._waiting = False
-        return self._chosen_action
+        # Build button list from whatever actions are actually available
+        buttons = []
+        for a in valid_actions:
+            name = a["action"]
+            if name == "fold":
+                label, color = "FOLD", (180, 40, 40)
+            elif name == "call":
+                amt   = a["amount"]
+                label = f"CALL  {amt}" if amt else "CHECK"
+                color = (40, 140, 40)
+            else:  # raise
+                raise_min = a["amount"]["min"]
+                label, color = f"RAISE  {raise_min}", (40, 80, 180)
+            buttons.append((label, color, a))
 
-    def close(self):
-        self._running = False
+        # Position buttons evenly at the bottom
+        bw, bh = 160, 44
+        total_w = len(buttons) * bw + (len(buttons) - 1) * 16
+        start_x = W // 2 - total_w // 2
+        rects = []
+        for i, (label, color, _) in enumerate(buttons):
+            x = start_x + i * (bw + 16)
+            rects.append(pygame.Rect(x, H - 60, bw, bh))
 
-    # ── Main loop (call from main thread) ────────────────────────────────────
-
-    def run(self, game_thread_fn=None):
-        """
-        Start the pygame event loop.  If `game_thread_fn` is provided it is
-        launched in a background thread so the UI stays responsive.
-        """
-        if game_thread_fn:
-            t = threading.Thread(target=game_thread_fn, daemon=True)
-            t.start()
-
-        while self._running:
-            self.clock.tick(30)
+        while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    self._running = False
-                    # Unblock any waiting game thread
-                    if self._waiting:
-                        self._chosen_action = ("fold", 0)
-                        self._action_event.set()
-                self._handle_event(event)
+                    pygame.quit()
+                    raise SystemExit
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, rect in enumerate(rects):
+                        if rect.collidepoint(event.pos):
+                            _, _, action = buttons[i]
+                            name = action["action"]
+                            if name == "raise":
+                                amount = action["amount"]["min"]
+                            else:
+                                amount = action["amount"]
+                            return name, amount
 
-            self._render()
+            # Draw the table + buttons every frame while waiting
+            self.screen.fill(GREEN)
+            self._draw_table()
+            self._draw_community()
+            self._draw_pot()
+            self._draw_players()
+            self._draw_log()
+            self._draw_street()
+
+            for i, (label, color, _) in enumerate(buttons):
+                rect = rects[i]
+                pygame.draw.rect(self.screen, color, rect, border_radius=6)
+                pygame.draw.rect(self.screen, GOLD,  rect, 2, border_radius=6)
+                txt = self.font_med.render(label, True, WHITE)
+                self.screen.blit(txt, txt.get_rect(center=rect.center))
+
             pygame.display.flip()
+            self.clock.tick(30)
 
+    def show_winner(self, message, pause_seconds=3):
+        """Flash a winner message for a few seconds."""
+        import time
+        deadline = time.time() + pause_seconds
+        while time.time() < deadline:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    raise SystemExit
+
+            self.draw()
+            banner = pygame.Surface((500, 70), pygame.SRCALPHA)
+            banner.fill((0, 0, 0, 200))
+            self.screen.blit(banner, (W // 2 - 250, H // 2 - 35))
+            pygame.draw.rect(self.screen, GOLD, (W // 2 - 250, H // 2 - 35, 500, 70), 3)
+            txt = self.font_lg.render(message, True, GOLD)
+            self.screen.blit(txt, txt.get_rect(center=(W // 2, H // 2)))
+            pygame.display.flip()
+            self.clock.tick(30)
+
+    def quit(self):
         pygame.quit()
 
-    # ── Event handling ────────────────────────────────────────────────────────
+    # ── Private drawing helpers ───────────────────────────────────────────────
 
-    def _handle_event(self, event):
-        if not self._waiting:
-            return
+    def _draw_table(self):
+        pygame.draw.ellipse(self.screen, DARK_GREEN, (60, 60, W - 120, H - 160))
+        pygame.draw.ellipse(self.screen, GOLD,       (60, 60, W - 120, H - 160), 3)
 
-        # Raise slider: left/right arrow keys
-        if event.type == pygame.KEYDOWN:
-            step = max(1, (self._raise_max - self._raise_min) // 20)
-            if event.key == pygame.K_LEFT:
-                self._raise_amount = max(self._raise_min, self._raise_amount - step)
-            elif event.key == pygame.K_RIGHT:
-                self._raise_amount = min(self._raise_max, self._raise_amount + step)
+    def _draw_street(self):
+        label = self.street.upper()
+        if self.round_num:
+            label += f"   Round {self.round_num}"
+        surf = self.font_med.render(label, True, GOLD)
+        self.screen.blit(surf, surf.get_rect(centerx=W // 2, y=68))
 
-        if self._btn_fold.handle_event(event):
-            self._chosen_action = ("fold", 0)
-            self._action_event.set()
-        elif self._btn_call.handle_event(event):
-            call_amount = 0
-            for a in self._valid_actions:
-                if a["action"] == "call":
-                    call_amount = a["amount"]
-            self._chosen_action = ("call", call_amount)
-            self._action_event.set()
-        elif self._btn_raise.handle_event(event):
-            if self._raise_max > 0:
-                self._chosen_action = ("raise", self._raise_amount)
-            else:
-                self._chosen_action = ("call", 0)
-            self._action_event.set()
+    def _draw_pot(self):
+        surf = self.font_med.render(f"POT  {self.pot:,}", True, YELLOW)
+        self.screen.blit(surf, surf.get_rect(centerx=W // 2, y=H // 2 - CARD_H // 2 - 28))
 
-        # Mouse wheel adjusts raise amount
-        if event.type == pygame.MOUSEWHEEL and self._raise_max > self._raise_min:
-            step = max(1, (self._raise_max - self._raise_min) // 20)
-            self._raise_amount = max(
-                self._raise_min,
-                min(self._raise_max, self._raise_amount + event.y * step)
-            )
-
-    # ── Rendering ─────────────────────────────────────────────────────────────
-
-    def _render(self):
-        with self._state_lock:
-            # Snapshot state to avoid holding lock during draw
-            community    = list(self._community)
-            hole_cards   = list(self._hole_cards)
-            street       = self._street
-            pot          = self._pot
-            seats        = list(self._seats)
-            strength     = self._hand_strength
-            equity       = self._equity
-            log          = list(self._action_log)
-            waiting      = self._waiting
-            valid_acts   = list(self._valid_actions)
-            raise_amt    = self._raise_amount
-            raise_min    = self._raise_min
-            raise_max    = self._raise_max
-            human_uuid   = self._human_uuid
-            round_count  = self._round_count
-            winner_msg   = self._winner_msg
-
-        self.screen.fill(BG)
-
-        # ── Table oval ──────────────────────────────────────────────────────
-        table_rect = pygame.Rect(80, 80, WIN_W - 160, WIN_H - 220)
-        pygame.draw.ellipse(self.screen, (10, 80, 30), table_rect)
-        pygame.draw.ellipse(self.screen, GOLD, table_rect, 4)
-
-        # ── Street label ────────────────────────────────────────────────────
-        street_lbl = self.font_lg.render(
-            STREET_LABELS.get(street, street.upper()), True, GOLD
-        )
-        self.screen.blit(street_lbl, street_lbl.get_rect(centerx=WIN_W // 2, y=90))
-
-        # ── Round counter ───────────────────────────────────────────────────
-        if round_count:
-            rc = self.font_sm.render(f"Round {round_count}", True, TEXT_DIM)
-            self.screen.blit(rc, (WIN_W - rc.get_width() - 12, 8))
-
-        # ── Community cards ─────────────────────────────────────────────────
-        total_comm_w = 5 * CARD_W + 4 * 10
-        cx_start = WIN_W // 2 - total_comm_w // 2
-        cy = WIN_H // 2 - CARD_H // 2 - 10
+    def _draw_community(self):
+        total_w = 5 * CARD_W + 4 * 8
+        x = W // 2 - total_w // 2
+        y = H // 2 - CARD_H // 2
         for i in range(5):
-            x = cx_start + i * (CARD_W + 10)
-            if i < len(community):
-                _draw_card(self.screen, x, cy, community[i],
-                           self.font_card_big, self.font_card_small, face_up=True)
+            if i < len(self.community):
+                self._draw_card(x, y, self.community[i], face_up=True)
             else:
-                _draw_card_placeholder(self.screen, x, cy)
+                self._draw_card_slot(x, y)
+            x += CARD_W + 8
 
-        # ── Pot ─────────────────────────────────────────────────────────────
-        pot_surf = self.font_med.render(f"POT  {pot:,}", True, CHIP_YELLOW)
-        self.screen.blit(pot_surf, pot_surf.get_rect(centerx=WIN_W // 2, y=cy - 36))
-
-        # ── Players ─────────────────────────────────────────────────────────
-        self._draw_players(seats, human_uuid, hole_cards)
-
-        # ── HUD: hand strength + equity bars ────────────────────────────────
-        if hole_cards:
-            _draw_bar(self.screen, 20, 180, 160, 14, strength, BAR_GREEN,
-                      "Strength", self.font_sm)
-            _draw_bar(self.screen, 20, 220, 160, 14, equity, BAR_BLUE,
-                      "Equity", self.font_sm)
-
-        # ── Action log ──────────────────────────────────────────────────────
-        self._draw_log(log)
-
-        # ── Action buttons ───────────────────────────────────────────────────
-        if waiting:
-            self._draw_action_panel(valid_acts, raise_amt, raise_min, raise_max)
-
-        # ── Winner banner ────────────────────────────────────────────────────
-        if winner_msg:
-            self._draw_winner_banner(winner_msg)
-
-    def _draw_players(self, seats, human_uuid, hole_cards):
-        """Position players around the table oval."""
-        n = len(seats)
+    def _draw_players(self):
+        import math
+        n = len(self.seats)
         if n == 0:
             return
+        cx, cy = W // 2, H // 2
+        rx, ry = W // 2 - 110, H // 2 - 70
 
-        import math
-        cx, cy = WIN_W // 2, WIN_H // 2 - 10
-        rx, ry = WIN_W // 2 - 120, WIN_H // 2 - 80
+        for i, seat in enumerate(self.seats):
+            angle = math.radians(270 + (360 / n) * i)
+            px = int(cx + rx * math.cos(angle))
+            py = int(cy + ry * math.sin(angle))
 
-        for i, seat in enumerate(seats):
-            # Angle: human at bottom (270°), others spread around
-            angle_deg = 270 + (360 / n) * i
-            angle_rad = math.radians(angle_deg)
-            px = int(cx + rx * math.cos(angle_rad))
-            py = int(cy + ry * math.sin(angle_rad))
-
-            is_human = seat.get("uuid") == human_uuid
-            is_active = seat.get("state") == "participating"
-
-            # Name plate
             name  = seat.get("name", f"P{i}")
             stack = seat.get("stack", 0)
-            color = GOLD if is_human else (TEXT_LIGHT if is_active else TEXT_DIM)
+            active = seat.get("state") == "participating"
+            is_me  = i == 0   # seat 0 is always the human / agent under focus
 
-            name_surf  = self.font_sm.render(name, True, color)
-            stack_surf = self.font_sm.render(f"${stack:,}", True, CHIP_YELLOW if is_active else TEXT_DIM)
+            # Name + stack label
+            color = GOLD if is_me else (WHITE if active else GREY)
+            self.screen.blit(self.font_sm.render(name,          True, color),
+                             (px - 30, py - 10))
+            self.screen.blit(self.font_sm.render(f"${stack:,}", True, YELLOW if active else GREY),
+                             (px - 30, py + 6))
 
-            plate_w = max(name_surf.get_width(), stack_surf.get_width()) + 16
-            plate_h = name_surf.get_height() + stack_surf.get_height() + 10
-            plate_x = px - plate_w // 2
-            plate_y = py - plate_h // 2
-
-            # Background plate
-            plate_surf = pygame.Surface((plate_w, plate_h), pygame.SRCALPHA)
-            plate_surf.fill((0, 0, 0, 160))
-            self.screen.blit(plate_surf, (plate_x, plate_y))
-            if is_human:
-                pygame.draw.rect(self.screen, GOLD,
-                                 (plate_x, plate_y, plate_w, plate_h), 2, border_radius=4)
-
-            self.screen.blit(name_surf,  (plate_x + 8, plate_y + 4))
-            self.screen.blit(stack_surf, (plate_x + 8, plate_y + 4 + name_surf.get_height() + 2))
-
-            # Cards next to player
-            card_x = px + plate_w // 2 + 6
+            # Cards
+            card_x = px + 36
             card_y = py - CARD_H // 2
-
-            if is_human and hole_cards:
-                for j, card in enumerate(hole_cards):
-                    _draw_card(self.screen, card_x + j * (CARD_W + 4), card_y,
-                               card, self.font_card_big, self.font_card_small, face_up=True)
-            elif is_active:
-                # Show face-down cards for bots
+            if is_me and self.hole_cards:
+                for j, card in enumerate(self.hole_cards):
+                    self._draw_card(card_x + j * (CARD_W + 4), card_y, card, face_up=True)
+            elif active:
                 for j in range(2):
-                    _draw_card(self.screen, card_x + j * (CARD_W + 4), card_y,
-                               "XX", self.font_card_big, self.font_card_small, face_up=False)
+                    self._draw_card(card_x + j * (CARD_W + 4), card_y, None, face_up=False)
 
-    def _draw_log(self, log):
-        """Draw the action log panel on the right side."""
-        panel_x, panel_y = WIN_W - 220, 80
-        panel_w, panel_h = 210, 300
+    def _draw_log(self):
+        x, y = W - 190, 80
+        for line in self.log:
+            surf = self.font_sm.render(line[:26], True, GREY)
+            self.screen.blit(surf, (x, y))
+            y += 22
 
-        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        panel.fill((0, 0, 0, 130))
-        self.screen.blit(panel, (panel_x, panel_y))
-        pygame.draw.rect(self.screen, GOLD, (panel_x, panel_y, panel_w, panel_h), 1)
+    def _draw_card(self, x, y, card_str, face_up):
+        rect = pygame.Rect(x, y, CARD_W, CARD_H)
+        if not face_up:
+            pygame.draw.rect(self.screen, CARD_BACK, rect, border_radius=5)
+            pygame.draw.rect(self.screen, GOLD,      rect, 1, border_radius=5)
+            return
 
-        hdr = self.font_sm.render("ACTION LOG", True, GOLD)
-        self.screen.blit(hdr, (panel_x + 8, panel_y + 6))
+        pygame.draw.rect(self.screen, WHITE, rect, border_radius=5)
+        pygame.draw.rect(self.screen, GREY,  rect, 1, border_radius=5)
 
-        for i, line in enumerate(log[-10:]):
-            color = TEXT_LIGHT if i == len(log) - 1 else TEXT_DIM
-            surf = self.font_sm.render(line[:28], True, color)
-            self.screen.blit(surf, (panel_x + 6, panel_y + 28 + i * 26))
+        suit_char = card_str[0].upper()
+        rank_char = card_str[1].upper()
+        symbol, color = SUITS.get(suit_char, ('?', BLACK))
+        rank_txt = RANKS.get(rank_char, rank_char)
 
-    def _draw_action_panel(self, valid_acts, raise_amt, raise_min, raise_max):
-        """Draw fold/call/raise buttons and raise slider."""
-        # Update call button label with amount
-        call_amount = 0
-        for a in valid_acts:
-            if a["action"] == "call":
-                call_amount = a["amount"]
-        self._btn_call.label = f"CALL  {call_amount:,}" if call_amount else "CHECK"
+        self.screen.blit(self.font_sm.render(rank_txt, True, color), (x + 3,  y + 2))
+        self.screen.blit(self.font_sm.render(symbol,   True, color), (x + 3,  y + 16))
+        big = self.font_lg.render(symbol, True, color)
+        self.screen.blit(big, big.get_rect(center=(x + CARD_W // 2, y + CARD_H // 2)))
 
-        self._btn_fold.draw(self.screen)
-        self._btn_call.draw(self.screen)
-
-        # Only show raise if it's a valid action
-        can_raise = any(a["action"] == "raise" for a in valid_acts)
-        if can_raise and raise_max > 0:
-            self._btn_raise.label = f"RAISE  {raise_amt:,}"
-            self._btn_raise.draw(self.screen)
-
-            # Raise slider bar
-            slider_x = WIN_W // 2 + 170
-            slider_y = WIN_H - 56
-            slider_w = 200
-            slider_h = 10
-            pygame.draw.rect(self.screen, BAR_BG, (slider_x, slider_y, slider_w, slider_h), border_radius=4)
-            if raise_max > raise_min:
-                ratio = (raise_amt - raise_min) / (raise_max - raise_min)
-                fill  = int(slider_w * ratio)
-                pygame.draw.rect(self.screen, BTN_RAISE, (slider_x, slider_y, fill, slider_h), border_radius=4)
-            hint = self.font_sm.render("← → or scroll to adjust", True, TEXT_DIM)
-            self.screen.blit(hint, (slider_x, slider_y + 14))
-
-    def _draw_winner_banner(self, message):
-        """Overlay a semi-transparent winner banner."""
-        banner = pygame.Surface((600, 80), pygame.SRCALPHA)
-        banner.fill((0, 0, 0, 200))
-        self.screen.blit(banner, (WIN_W // 2 - 300, WIN_H // 2 - 40))
-        pygame.draw.rect(self.screen, GOLD, (WIN_W // 2 - 300, WIN_H // 2 - 40, 600, 80), 3)
-        txt = self.font_lg.render(message, True, GOLD)
-        self.screen.blit(txt, txt.get_rect(center=(WIN_W // 2, WIN_H // 2)))
-
-
-# ── Standalone demo ───────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import time
-
-    ui = PokerUI("Poker UI — Demo")
-
-    def demo_game():
-        """Simulate a few state updates so you can see the UI."""
-        time.sleep(0.5)
-
-        # Fake round state
-        fake_state = {
-            "street": "flop",
-            "round_count": 3,
-            "pot": {"main": {"amount": 240}},
-            "community_card": ["HK", "D7", "C2"],
-            "seats": [
-                {"uuid": "human-1", "name": "You",       "stack": 760, "state": "participating"},
-                {"uuid": "bot-1",   "name": "RandomBot", "stack": 500, "state": "participating"},
-                {"uuid": "bot-2",   "name": "CallBot",   "stack": 740, "state": "participating"},
-            ],
-            "action_histories": {},
-            "dealer_btn": 0,
-        }
-
-        ui.set_state(
-            round_state=fake_state,
-            hole_cards=["SA", "HQ"],
-            hand_strength=0.78,
-            equity=0.65,
-            human_uuid="human-1",
-            valid_actions=[
-                {"action": "fold",  "amount": 0},
-                {"action": "call",  "amount": 40},
-                {"action": "raise", "amount": {"min": 80, "max": 760}},
-            ],
-            raise_min=80,
-            raise_max=760,
-        )
-        ui.add_action_log("RandomBot raised 80")
-        ui.add_action_log("CallBot called 80")
-        ui.add_action_log("Your turn!")
-
-        # Wait for human to act
-        action = ui.wait_for_action()
-        ui.add_action_log(f"You: {action[0]} {action[1]}")
-        time.sleep(0.5)
-
-        # River
-        fake_state["street"] = "river"
-        fake_state["community_card"] = ["HK", "D7", "C2", "S5", "DA"]
-        fake_state["pot"]["main"]["amount"] = 480
-        ui.set_state(
-            round_state=fake_state,
-            hole_cards=["SA", "HQ"],
-            hand_strength=0.85,
-            equity=0.72,
-            human_uuid="human-1",
-        )
-        ui.add_action_log("Dealt river: A♦")
-        time.sleep(2)
-
-        ui.set_winner("You win!  +480 chips")
-        time.sleep(3)
-        ui.close()
-
-    ui.run(game_thread_fn=demo_game)
+    def _draw_card_slot(self, x, y):
+        pygame.draw.rect(self.screen, (20, 70, 40),
+                         (x, y, CARD_W, CARD_H), border_radius=5)
+        pygame.draw.rect(self.screen, (40, 90, 55),
+                         (x, y, CARD_W, CARD_H), 1, border_radius=5)
