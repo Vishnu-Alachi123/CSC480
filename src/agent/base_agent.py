@@ -62,7 +62,7 @@ def best_hand_rank(hole_cards: list, community_cards: list) -> HandRank:
 def _preflop_estimate(hole_cards: list) -> HandRank:
     """
     Rough preflop hand quality without community cards.
-    Pocket pair → PAIR, high cards (A/K/Q) → HIGH_CARD with a bump,
+    Pocket pair → PAIR, high cards (A/K/Q) → HIGH_CARD with a bump, Same suit → FLUSH
     everything else → HIGH_CARD.
     """
     if len(hole_cards) < 2:
@@ -78,6 +78,9 @@ def _preflop_estimate(hole_cards: list) -> HandRank:
     high_ranks = {Rank.ACE, Rank.KING, Rank.QUEEN}
     if r1 in high_ranks or r2 in high_ranks:
         return HandRank.HIGH_CARD  # still HIGH_CARD but caller can check rank
+
+    if _SUIT_MAP[hole_cards[0][0]] == _SUIT_MAP[hole_cards[1][0]]:
+        return HandRank.FLUSH
 
     return HandRank.HIGH_CARD
 
