@@ -1,0 +1,3 @@
+pygame==2.6.1
+PyPokerEngine==1.0.1
+treys==0.1.8
