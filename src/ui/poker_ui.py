@@ -132,7 +132,7 @@ class PokerUI:
         total_w = len(buttons) * bw + (len(buttons) - 1) * 16
         start_x = W // 2 - total_w // 2
         rects = []
-        for i, (label, color, _) in enumerate(buttons):
+        for i in range(len(buttons)):
             x = start_x + i * (bw + 16)
             rects.append(pygame.Rect(x, H - 60, bw, bh))
 
@@ -167,6 +167,69 @@ class PokerUI:
                 pygame.draw.rect(self.screen, GOLD,  rect, 2, border_radius=6)
                 txt = self.font_med.render(label, True, WHITE)
                 self.screen.blit(txt, txt.get_rect(center=rect.center))
+
+            pygame.display.flip()
+            self.clock.tick(30)
+
+    def show_showdown(self, player_hands, community_cards, winner_name, pause_seconds=4):
+        """
+        Show all players' hole cards face-up at the end of a round.
+
+        player_hands: list of {"name": str, "cards": [str, str], "hand_name": str}
+        community_cards: list of card strings (the final board)
+        winner_name: name of the winner to highlight
+        """
+        import time
+        deadline = time.time() + pause_seconds
+        while time.time() < deadline:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    raise SystemExit
+
+            self.screen.fill(GREEN)
+            self._draw_table()
+
+            # Board
+            self.community = community_cards
+            self._draw_community()
+
+            # Title
+            title = self.font_lg.render("SHOWDOWN", True, GOLD)
+            self.screen.blit(title, title.get_rect(centerx=W // 2, y=68))
+
+            # Each player's hand laid out in a row at the bottom half
+            n = len(player_hands)
+            slot_w = W // max(n, 1)
+            for i, p in enumerate(player_hands):
+                cx = slot_w * i + slot_w // 2
+                y_name = H // 2 + CARD_H // 2 + 20
+
+                is_winner = p["name"] == winner_name
+                name_color = GOLD if is_winner else WHITE
+
+                # Cards side by side
+                cards = p.get("cards", [])
+                total_cards_w = len(cards) * CARD_W + (len(cards) - 1) * 6
+                card_x = cx - total_cards_w // 2
+                for card_str in cards:
+                    self._draw_card(card_x, H // 2 + CARD_H // 2 - 20, card_str, face_up=True)
+                    card_x += CARD_W + 6
+
+                # Name
+                name_surf = self.font_med.render(p["name"], True, name_color)
+                self.screen.blit(name_surf, name_surf.get_rect(centerx=cx, y=y_name + CARD_H))
+
+                # Hand name (e.g. "TWO PAIR")
+                hand_name = p.get("hand_name", "")
+                if hand_name:
+                    hn_surf = self.font_sm.render(hand_name, True, YELLOW if is_winner else GREY)
+                    self.screen.blit(hn_surf, hn_surf.get_rect(centerx=cx, y=y_name + CARD_H + 22))
+
+                # Winner crown marker
+                if is_winner:
+                    crown = self.font_lg.render("★ WINNER", True, GOLD)
+                    self.screen.blit(crown, crown.get_rect(centerx=cx, y=y_name + CARD_H + 44))
 
             pygame.display.flip()
             self.clock.tick(30)
@@ -235,10 +298,10 @@ class PokerUI:
             px = int(cx + rx * math.cos(angle))
             py = int(cy + ry * math.sin(angle))
 
-            name  = seat.get("name", f"P{i}")
-            stack = seat.get("stack", 0)
+            name   = seat.get("name", f"P{i}")
+            stack  = seat.get("stack", 0)
             active = seat.get("state") == "participating"
-            is_me  = i == 0   # seat 0 is always the human / agent under focus
+            is_me  = i == 0   # seat 0 is always the focus player
 
             # Name + stack label
             color = GOLD if is_me else (WHITE if active else GREY)

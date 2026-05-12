@@ -3,34 +3,109 @@ ui/play.py
 ----------
 Run a poker game with the pygame UI.
 
-To plug in your own agent, just swap it in the `agents` list below.
-Your agent only needs to implement decide_action() — everything else is handled.
+To plug in your own agent, swap it into the agents list at the bottom.
+Your agent only needs to implement declare_action() — everything else is handled.
 
 Run from the repo root:
     python -m src.ui.play
 """
 
-import sys, os
+import sys, os, random
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from pypokerengine.players import BasePokerPlayer
 from pypokerengine.api.game import setup_config, start_poker
 
 from src.ui.poker_ui import PokerUI
-from src.environment.game import RandomAgent, CallAgent
+from src.core.card import Card, Rank, Suit
+from src.core.hand_evaluator import evaluate, HandRank
 
-# ── Config ────────────────────────────────────────────────────────────────────
-MAX_ROUNDS    = 15
-INITIAL_STACK = 1000
-SMALL_BLIND   = 10
+# ── PyPokerEngine card string  →  src.core.card.Card ─────────────────────────
+# PyPokerEngine format is suit-first: "SA" = Ace of Spades, "H9" = Nine of Hearts
+
+_SUIT_MAP = {
+    'S': Suit.SPADES,
+    'H': Suit.HEARTS,
+    'D': Suit.DIAMONDS,
+    'C': Suit.CLUBS,
+}
+_RANK_MAP = {
+    '2': Rank.TWO,   '3': Rank.THREE, '4': Rank.FOUR,  '5': Rank.FIVE,
+    '6': Rank.SIX,   '7': Rank.SEVEN, '8': Rank.EIGHT, '9': Rank.NINE,
+    'T': Rank.TEN,   'J': Rank.JACK,  'Q': Rank.QUEEN, 'K': Rank.KING,
+    'A': Rank.ACE,
+}
+
+def _parse_card(card_str: str) -> Card:
+    """Convert a PyPokerEngine card string like 'SA' or 'H9' to a core Card."""
+    suit = _SUIT_MAP[card_str[0].upper()]
+    rank = _RANK_MAP[card_str[1].upper()]
+    return Card(rank, suit)
+
+def _hand_name(hole_strs: list, community_strs: list) -> str:
+    """
+    Use src.core.hand_evaluator.evaluate() to get the best 5-card hand name
+    from a player's hole cards + community cards.
+    Returns a readable string like "Full House".
+    """
+    all_cards = [_parse_card(c) for c in hole_strs + community_strs]
+    if len(all_cards) < 5:
+        return ""
+
+    # Try all 5-card combinations and return the best hand
+    from itertools import combinations
+    best = HandRank.HIGH_CARD
+    for combo in combinations(all_cards, 5):
+        result = evaluate(list(combo))
+        if result > best:
+            best = result
+
+    return best.name.replace("_", " ").title()
 
 
-# ── Human agent — reads from the UI ──────────────────────────────────────────
+# ── Simple baseline bots ──────────────────────────────────────────────────────
+
+class RandomAgent(BasePokerPlayer):
+    """Picks a random valid action."""
+    def declare_action(self, valid_actions, hole_card, round_state):
+        action = random.choice(valid_actions)
+        if action["action"] == "raise":
+            mn, mx = action["amount"]["min"], action["amount"]["max"]
+            return "raise", random.randint(mn, mx) if mx > mn else mn
+        return action["action"], action["amount"]
+    def receive_game_start_message(self, g): pass
+    def receive_round_start_message(self, r, h, s): pass
+    def receive_street_start_message(self, s, rs): pass
+    def receive_game_update_message(self, a, rs): pass
+    def receive_round_result_message(self, w, h, rs): pass
+
+
+class CallAgent(BasePokerPlayer):
+    """Always calls."""
+    def declare_action(self, valid_actions, hole_card, round_state):
+        call = valid_actions[1]
+        return call["action"], call["amount"]
+    def receive_game_start_message(self, g): pass
+    def receive_round_start_message(self, r, h, s): pass
+    def receive_street_start_message(self, s, rs): pass
+    def receive_game_update_message(self, a, rs): pass
+    def receive_round_result_message(self, w, h, rs): pass
+
+
+# ── Hole card registry ────────────────────────────────────────────────────────
+# Each agent stores its hole cards here at round start so the showdown can
+# display them. Maps player name -> list of card strings.
+_hole_card_registry: dict = {}
+
+
+# ── Human agent ───────────────────────────────────────────────────────────────
+
 class HumanAgent(BasePokerPlayer):
     """Lets a human play via the pygame buttons."""
 
-    def __init__(self, ui: PokerUI):
-        self.ui = ui
+    def __init__(self, ui: PokerUI, name: str = "You"):
+        self.ui    = ui
+        self._name = name
 
     def declare_action(self, valid_actions, hole_card, round_state):
         self.ui.update(
@@ -44,11 +119,14 @@ class HumanAgent(BasePokerPlayer):
         self.ui.log_action("Your turn")
         return self.ui.ask_human(valid_actions)
 
-    def receive_game_start_message(self, g):   pass
-    def receive_round_start_message(self, r, h, s): pass
-    def receive_street_start_message(self, s, rs):  pass
+    def receive_game_start_message(self, g): pass
+
+    def receive_round_start_message(self, r, hole_card, s):
+        _hole_card_registry[self._name] = hole_card
+
+    def receive_street_start_message(self, s, rs): pass
+
     def receive_game_update_message(self, action, round_state):
-        # Log every action so the human can see what opponents did
         name   = action.get("player_uuid", "?")
         act    = action.get("action", "")
         amount = action.get("amount", 0)
@@ -68,21 +146,24 @@ class HumanAgent(BasePokerPlayer):
         self.ui.draw()
 
     def receive_round_result_message(self, winners, hand_info, round_state):
-        for w in winners:
-            self.ui.show_winner(f"{w.get('name','?')} wins  +{w.get('amount',0):,}")
+        winner_name = winners[0].get("name", "?") if winners else "?"
+        _show_showdown(self.ui, round_state, winner_name)
 
 
-# ── Watcher agent — shows an AI game in the UI ───────────────────────────────
+# ── Watcher agent ─────────────────────────────────────────────────────────────
+
 class WatcherAgent(BasePokerPlayer):
     """
-    Wraps any agent and mirrors its game state to the UI so you can watch.
+    Wraps any agent and mirrors its game state to the UI.
     The wrapped agent still makes all the decisions.
+    Set is_focus=True to show that agent's hole cards face-up.
     """
 
-    def __init__(self, ui: PokerUI, agent: BasePokerPlayer, is_focus: bool = False):
+    def __init__(self, ui: PokerUI, agent: BasePokerPlayer, name: str, is_focus: bool = False):
         self.ui       = ui
         self.agent    = agent
-        self.is_focus = is_focus   # if True, show this agent's hole cards face-up
+        self._name    = name
+        self.is_focus = is_focus
 
     def declare_action(self, valid_actions, hole_card, round_state):
         if self.is_focus:
@@ -100,8 +181,9 @@ class WatcherAgent(BasePokerPlayer):
     def receive_game_start_message(self, g):
         self.agent.receive_game_start_message(g)
 
-    def receive_round_start_message(self, r, h, s):
-        self.agent.receive_round_start_message(r, h, s)
+    def receive_round_start_message(self, r, hole_card, s):
+        _hole_card_registry[self._name] = hole_card
+        self.agent.receive_round_start_message(r, hole_card, s)
 
     def receive_street_start_message(self, s, rs):
         self.ui.update(
@@ -128,18 +210,39 @@ class WatcherAgent(BasePokerPlayer):
         self.agent.receive_game_update_message(action, round_state)
 
     def receive_round_result_message(self, winners, hand_info, round_state):
-        for w in winners:
-            self.ui.show_winner(f"{w.get('name','?')} wins  +{w.get('amount',0):,}")
+        winner_name = winners[0].get("name", "?") if winners else "?"
+        _show_showdown(self.ui, round_state, winner_name)
         self.agent.receive_round_result_message(winners, hand_info, round_state)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Showdown ──────────────────────────────────────────────────────────────────
 
-def run_with_ui(agents, max_rounds=MAX_ROUNDS, initial_stack=INITIAL_STACK, small_blind=SMALL_BLIND):
+def _show_showdown(ui, round_state, winner_name):
     """
-    Run a game. agents is a list of (name, agent_instance) tuples.
-    The first agent in the list is treated as the 'focus' player (cards shown face-up).
+    Reveal all players' hole cards and evaluate their hands using
+    src.core.hand_evaluator, then display the showdown screen.
     """
+    seats     = round_state.get("seats", [])
+    community = round_state.get("community_card", [])
+
+    player_hands = []
+    for seat in seats:
+        name  = seat.get("name", "?")
+        cards = _hole_card_registry.get(name, [])
+        # Use our own hand evaluator to get the hand name
+        hand_label = _hand_name(cards, community) if cards else ""
+        player_hands.append({
+            "name":      name,
+            "cards":     cards,
+            "hand_name": hand_label,
+        })
+
+    ui.show_showdown(player_hands, community, winner_name, pause_seconds=4)
+
+
+# ── Game runner ───────────────────────────────────────────────────────────────
+
+def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
     config = setup_config(
         max_round=max_rounds,
         initial_stack=initial_stack,
@@ -147,33 +250,22 @@ def run_with_ui(agents, max_rounds=MAX_ROUNDS, initial_stack=INITIAL_STACK, smal
     )
     for name, agent in agents:
         config.register_player(name=name, algorithm=agent)
+    return start_poker(config, verbose=0)
 
-    result = start_poker(config, verbose=0)
-    return result
 
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     ui = PokerUI("Texas Hold'em")
 
-    # ── Swap agents here ──────────────────────────────────────────────────────
-    #
-    # Option A: Human vs bots
+    from src.agent.base_agent import SimpleAgent
     agents = [
-        ("You",       HumanAgent(ui)),
-        ("RandomBot", RandomAgent()),
-        ("CallBot",   CallAgent()),
+        ("You",       HumanAgent(ui, name="You")),
+        ("SimpleAgent", WatcherAgent(ui, SimpleAgent(), name="SimpleAgent", is_focus=True))
     ]
-    #
-    # Option B: Watch two AI agents play (first one shown face-up)
-    # agents = [
-    #     ("MyAgent",   WatcherAgent(ui, YourAgent(), is_focus=True)),
-    #     ("CallBot",   WatcherAgent(ui, CallAgent())),
-    # ]
-    # ─────────────────────────────────────────────────────────────────────────
 
     result = run_with_ui(agents)
 
-    # Final standings
     standings = "  |  ".join(f"{p['name']}: {p['stack']:,}" for p in result["players"])
     ui.show_winner(standings, pause_seconds=5)
     ui.quit()
