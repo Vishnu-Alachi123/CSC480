@@ -1,6 +1,5 @@
 """
 ui/play.py
-----------
 Run a poker game with the pygame UI.
 
 To plug in your own agent, swap it into the agents list at the bottom.
@@ -21,7 +20,7 @@ from src.core.card import Card, Rank, Suit, Deck
 from src.core.hand_evaluator import evaluate, HandRank
 from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
 
-# ── PyPokerEngine card string  →  src.core.card.Card ─────────────────────────
+# PyPokerEngine card string  ->  src.core.card.Card
 # PyPokerEngine format is suit-first: "SA" = Ace of Spades, "H9" = Nine of Hearts
 
 _SUIT_MAP = {
@@ -64,7 +63,7 @@ def _hand_name(hole_strs: list, community_strs: list) -> str:
     return best.name.replace("_", " ").title()
 
 
-# ── Simple baseline bots ──────────────────────────────────────────────────────
+# Simple baseline bots 
 
 class RandomAgent(BasePokerPlayer):
     """Picks a random valid action."""
@@ -93,7 +92,7 @@ class CallAgent(BasePokerPlayer):
     def receive_round_result_message(self, w, h, rs): pass
 
 
-# ── Hole card registry ────────────────────────────────────────────────────────
+# Hole card registry 
 # Each agent stores its hole cards here at round start so the showdown can
 # display them. Maps player name -> list of card strings.
 _hole_card_registry: dict = {}
@@ -113,7 +112,7 @@ def _ui_update(ui, hole_cards, round_state):
     )
 
 
-# ── Human agent ───────────────────────────────────────────────────────────────
+# Human agent 
 
 class HumanAgent(BasePokerPlayer):
     """Lets a human play via the pygame buttons."""
@@ -151,7 +150,7 @@ class HumanAgent(BasePokerPlayer):
         _show_showdown(self.ui, hand_info, round_state, winner_name)
 
 
-# ── Watcher agent ─────────────────────────────────────────────────────────────
+# Watcher agent
 
 class WatcherAgent(BasePokerPlayer):
     """
@@ -160,7 +159,7 @@ class WatcherAgent(BasePokerPlayer):
     Set is_focus=True to show that agent's hole cards face-up.
     """
 
-    def __init__(self, ui: PokerUI, agent: BasePokerPlayer, name: str, is_focus: bool = True):
+    def __init__(self, ui: PokerUI, agent: BasePokerPlayer, name: str, is_focus: bool = False):
         self.ui       = ui
         self.agent    = agent
         self._name    = name
@@ -203,7 +202,7 @@ class WatcherAgent(BasePokerPlayer):
         self.agent.receive_round_result_message(winners, hand_info, round_state)
 
 
-# ── Showdown ──────────────────────────────────────────────────────────────────
+# Showdown 
 
 def _show_showdown(ui, hand_info, round_state, winner_name):
     """
@@ -228,7 +227,7 @@ def _show_showdown(ui, hand_info, round_state, winner_name):
     ui.show_showdown(player_hands, community, winner_name, pause_seconds=4)
 
 
-# ── Game runner ───────────────────────────────────────────────────────────────
+# Game runner
 
 def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
     config = setup_config(
@@ -241,7 +240,7 @@ def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
     return start_poker(config, verbose=0)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 
 if __name__ == "__main__":
     ui = PokerUI("Texas Hold'em")

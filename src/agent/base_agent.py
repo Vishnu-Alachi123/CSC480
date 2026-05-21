@@ -1,15 +1,14 @@
 """
 agent/base_agent.py
--------------------
-A simple rule-based poker agent that uses src.core.hand_evaluator
+A simple rule-based poker agent that uses hand_evaluator
 to make decisions based on hand strength.
 
 Decision logic:
     - Evaluate the best 5-card hand from hole cards + community cards
     - Map the hand rank to a threshold:
-        strong hand  (Full House+)  → raise
-        decent hand  (Straight+)    → call
-        weak hand    (Two Pair-)    → fold if it costs chips, else check
+        strong hand (Full House+) -> raise
+        decent hand (Straight+) -> call
+        weak hand (Two Pair-) -> fold if it costs chips, else check
 """
 
 import sys, os
@@ -52,7 +51,6 @@ def best_hand_rank(hole_cards: list, community_cards: list) -> HandRank:
     all_cards = [_parse(c) for c in hole_cards + community_cards]
 
     if len(all_cards) < 5:
-        # Preflop / early streets — not enough cards to evaluate properly.
         # Do a rough preflop estimate based on hole card ranks instead.
         return _preflop_estimate(hole_cards)
 
@@ -67,8 +65,8 @@ def best_hand_rank(hole_cards: list, community_cards: list) -> HandRank:
 def _preflop_estimate(hole_cards: list) -> HandRank:
     """
     Rough preflop hand quality without community cards.
-    Pocket pair → PAIR, high cards (A/K/Q) → HIGH_CARD with a bump, Same suit → FLUSH
-    everything else → HIGH_CARD.
+    Pocket pair -> PAIR, high cards (A/K/Q) -> HIGH_CARD with a bump, Same suit -> FLUSH
+    everything else -> HIGH_CARD.
     """
     if len(hole_cards) < 2:
         return HandRank.HIGH_CARD
@@ -92,11 +90,11 @@ def _preflop_estimate(hole_cards: list) -> HandRank:
 
 # Decision thresholds 
 #
-# You can tune these to change how aggressive the agent is.
+# Tune these to change how aggressive the agent is.
 #
-#   RAISE_THRESHOLD  — hand rank at or above this → raise
-#   CALL_THRESHOLD   — hand rank at or above this → call
-#   below CALL_THRESHOLD → fold (or check if free)
+#   RAISE_THRESHOLD — hand rank at or above this -> raise
+#   CALL_THRESHOLD — hand rank at or above this -> call
+#   below CALL_THRESHOLD -> fold (or check if free)
 
 
 def opponent_danger(sim_result: float):
@@ -105,21 +103,21 @@ def opponent_danger(sim_result: float):
     return (1 - sim_result) * 100
 
 RAISE_THRESHOLD  = HandRank.TWO_PAIR       # raise with two pair or better
-CALL_THRESHOLD   = HandRank.PAIR           # call with any pair or better
+CALL_THRESHOLD   = HandRank.HIGH_CARD          
 DANGER_THRESHOLD = 70                      # tolerate up to 70/100 danger before folding
 
 class SimpleAgent(BasePokerPlayer):
     """
-    Rule-based agent that uses src.core.hand_evaluator to decide actions.
+    Rule-based agent that uses hand_evaluator to decide actions.
 
-    Preflop:  plays pocket pairs and high cards, folds junk
+    Preflop: plays pocket pairs and high cards, folds junk
     Postflop: raises strong hands, calls decent hands, folds weak ones
     """
 
     def declare_action(self, valid_actions, hole_card, round_state):
         community = round_state.get("community_card", [])
-        seats     = round_state.get("seats", [])
-        rank      = best_hand_rank(hole_card, community)
+        seats = round_state.get("seats", [])
+        rank = best_hand_rank(hole_card, community)
 
         # valid_actions is always [fold, call, raise]
         fold_action  = valid_actions[0]
@@ -146,12 +144,12 @@ class SimpleAgent(BasePokerPlayer):
         # run Monte Carlo simulation
         street = round_state.get("street", "preflop")
         round_num = round_state.get("round_count", 0)
-        sim_result, player_rank, opp_hand_counts = monte_carlo_simulation(
-            deck            = deck,
-            hole_cards      = parsed_hole,
+        sim_result, current_rank, projected_rank, opp_hand_counts, player_hand_counts = monte_carlo_simulation(
+            deck = deck,
+            hole_cards = parsed_hole,
             community_cards = parsed_community,
-            num_opp         = max(num_opp, 1),
-            num_sims        = 500,   # keep fast; raise for more accuracy
+            num_opp = max(num_opp, 1),
+            num_sims = 500,
         )
 
         danger = opponent_danger(sim_result)
@@ -197,29 +195,32 @@ class SimpleAgent(BasePokerPlayer):
         # Print summary
         print(f"\n{'='*50}")
         print(f"[Round {round_num} | {street.upper()}]")
-        print(f"  Hole cards    : {hole_card}")
-        print(f"  Best hand     : {rank.name.replace('_', ' ')}")
-        print(f"  Win prob      : {sim_result * 100:.1f}%")
-        print(f"  Danger score  : {danger:.0f}/100")
-        print(f"  Agent stack   : ${agent_stack:,}")
-        print(f"  Decision      : {action.upper()}")
-        print(f"  Reason        : {reason}")
+        print(f"  Hole cards      : {hole_card}")
+        print(f"  Current hand    : {current_rank.name.replace('_', ' ')}")
+        print(f"  Projected hand  : {projected_rank.name.replace('_', ' ')} (most likely after board completes)")
+        print(f"  Win prob        : {sim_result * 100:.1f}%")
+        print(f"  Danger score    : {danger:.0f}/100")
+        print(f"  Agent stack     : ${agent_stack:,}")
+        print(f"  Decision        : {action.upper()}")
+        print(f"  Reason          : {reason}")
         print(f"{'='*50}\n")
 
         # Plot and pause for analysis
         plot_simulation_result(
-            opp_hand_counts  = opp_hand_counts,
-            player_rank      = player_rank,
-            win_probability  = sim_result,
-            street           = street,
-            round_num        = round_num,
-            hole_cards       = hole_card,
-            decision         = action,
-            decision_reason  = reason,
-            agent_stack      = agent_stack,
+            opp_hand_counts    = opp_hand_counts,
+            player_rank        = projected_rank,
+            win_probability    = sim_result,
+            street             = street,
+            round_num          = round_num,
+            hole_cards         = hole_card,
+            decision           = action,
+            decision_reason    = reason,
+            agent_stack        = agent_stack,
+            current_rank       = current_rank,
+            player_hand_counts = player_hand_counts,
         )
 
-        input("  ↵  Press Enter to continue...\n")
+        input(" Press Enter to continue...\n")
 
         return action, amount
 

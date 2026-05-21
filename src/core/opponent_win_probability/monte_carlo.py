@@ -15,36 +15,39 @@ Args:
     num_opp: number of players, this changes how many cards should be removed from the deck for each simulation
 
 Returns:
-    win_probability:  float 0–1, fraction of simulations the player wins (ties count as 0.5)
-    player_rank:      HandRank — the best hand the player can make from currently known cards
-    opp_hand_counts:  dict[HandRank, int] — distribution of opponent hand ranks across all simulations
+    win_probability:   float 0–1, fraction of simulations the player wins (ties count as 0.5)
+    current_rank:      HandRank — best hand from currently visible cards (hole + community)
+    projected_rank:    HandRank — most likely best hand across simulated completed boards
+    opp_hand_counts:   dict[HandRank, int] — distribution of opponent hand ranks across all simulations
 """
-def monte_carlo_simulation(deck: Deck, hole_cards: list[Card], community_cards: list[Card], num_opp: int = 2, num_sims: int = 10000):
+def monte_carlo_simulation(deck: Deck, hole_cards: list[Card], community_cards: list[Card], num_opp: int = 2, num_sims: int = 1000):
 
     board_cards_needed = 5 - len(community_cards)
     deck_cards = deck.cards
     opp_hand_counts = defaultdict(int)
+    player_rank_counts = defaultdict(int)
 
     wins  = 0
     ties  = 0
     total = 0
-    player_rank_counts = defaultdict(int)  # track distribution of player's hand across simulations
 
+    # Best hand from currently known cards (hole + visible community cards)
     known_cards = hole_cards + community_cards
-    if len(known_cards) >= 7:
-        player_rank = max(evaluate(list(c)) for c in combinations(known_cards, 5))
+    if len(known_cards) >= 5:
+        current_rank = max(evaluate(list(c)) for c in combinations(known_cards, 5))
+    elif len(known_cards) > 0:
+        current_rank = evaluate(known_cards)
     else:
-        player_rank = None  
+        current_rank = HandRank.HIGH_CARD
 
     if board_cards_needed == 0:
         # River is dealt — board is complete, evaluate everything exactly
+        projected_rank = current_rank  # no future cards to simulate
+
         for opp_cards in combinations(deck_cards, 2 * num_opp):
-
-            opp_hands = [opp_cards[i*2:i*2+2] for i in range(num_opp)]
-
             opp_ranks = [
-                max(evaluate(list(c)) for c in combinations(list(opp_hand) + community_cards, 5))
-                for opp_hand in opp_hands
+                max(evaluate(list(c)) for c in combinations(list(opp_cards[i*2:i*2+2]) + community_cards, 5))
+                for i in range(num_opp)
             ]
 
             for r in opp_ranks:
@@ -52,10 +55,9 @@ def monte_carlo_simulation(deck: Deck, hole_cards: list[Card], community_cards: 
 
             best_opp = max(opp_ranks)
 
-            player_rank = max(evaluate(list(c)) for c in combinations(list(hole_cards) + community_cards,5))
-            if player_rank > best_opp:
+            if current_rank > best_opp:
                 wins += 1
-            elif player_rank == best_opp:
+            elif current_rank == best_opp:
                 ties += 1
             total += 1
 
@@ -69,7 +71,7 @@ def monte_carlo_simulation(deck: Deck, hole_cards: list[Card], community_cards: 
             # Opponent hole cards are first, remaining cards complete the board
             board = community_cards + list(sample_cards[num_opp * 2:])
 
-            # Evaluate player on the same completed board for a fair comparison
+            # Evaluate player on the completed board
             sim_player_rank = max(evaluate(list(c)) for c in combinations(hole_cards + board, 5))
             player_rank_counts[sim_player_rank] += 1
 
@@ -90,10 +92,8 @@ def monte_carlo_simulation(deck: Deck, hole_cards: list[Card], community_cards: 
             total += 1
 
         # Most likely hand the player ends up with across all simulated boards
-        player_rank = max(player_rank_counts, key=player_rank_counts.get)
-        top_player_rank = max(player_rank_counts.keys())
-        print("top hand", top_player_rank)
+        projected_rank = max(player_rank_counts, key=player_rank_counts.get)
 
     win_probability = (wins + ties * 0.5) / total
 
-    return win_probability, player_rank, dict(opp_hand_counts)
+    return win_probability, current_rank, projected_rank, dict(opp_hand_counts), dict(player_rank_counts)
