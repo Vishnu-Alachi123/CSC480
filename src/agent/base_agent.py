@@ -20,6 +20,7 @@ from pypokerengine.players import BasePokerPlayer
 
 from src.core.card import Card, Rank, Suit
 from src.core.hand_evaluator import evaluate, HandRank
+from opponent_tracker import OpponentTracker
 
 # ── Card string parser (same as play.py) ─────────────────────────────────────
 
@@ -104,10 +105,57 @@ class SimpleAgent(BasePokerPlayer):
     Preflop:  plays pocket pairs and high cards, folds junk
     Postflop: raises strong hands, calls decent hands, folds weak ones
     """
+    def __init__(self):
+        self.tracker = OpponentTracker()
+
+    def recieve_round_start_message(self, round_count, hole_card, seats):
+        self.tracker.new_round()
+
+    def receive_game_update_message(self, action, round_state):
+        self.tracker.record_action(action, round_state)
+
+    def recieve_round_result_message(self, wnners, hand_info, round_state):
+        players = [seat["uuid"] for seat in round_state["seats"]]
+        self.tracker.finish_round(players)
+
 
     def declare_action(self, valid_actions, hole_card, round_state):
         community = round_state.get("community_card", [])
         rank      = best_hand_rank(hole_card, community)
+
+        #opponent analysis
+        active_players = [seat["uuid"]
+                          for seat in round_state["seats"]
+                          if seat["state"] == "participating"
+                          ]
+        
+        avg_aggression = sum(
+            self.tracker.aggression_score(p)
+            for p in active_players
+        ) / max(len(active_players), 1)
+
+        #adjust threshold based on table behavior
+        raise_threshold = RAISE_THRESHOLD
+        call_threshold = CALL_THRESHOLD
+
+        if avg_aggression > 2.0:
+            #aggreive table means we need to tighten up
+            call_threshold = HandRank.FLUSH
+
+        elif avg_aggression < 0.5:
+            #passive table so loosen up
+            call_threshold = HandRank.TWO_PAIR
+
+
+        #if any player is aggressively playing, make marginal hand a fold   
+        strong_opponents = [
+        p for p in active_players
+        if self.tracker.is_showing_strength_this_hand(p)
+        ]
+
+        if strong_opponents:
+            call_threshold = HandRank.FLUSH
+
 
         # valid_actions is always [fold, call, raise]
         fold_action  = valid_actions[0]
@@ -117,12 +165,12 @@ class SimpleAgent(BasePokerPlayer):
         call_cost = call_action["amount"]
 
         # ── Decision ──────────────────────────────────────────────────────────
-        if rank >= RAISE_THRESHOLD and raise_action:
+        if rank >= raise_threshold and raise_action:
             # Strong hand — raise the minimum
             raise_min = raise_action["amount"]["min"]
             return "raise", raise_min
 
-        elif rank >= CALL_THRESHOLD:
+        elif rank >= call_threshold:
             # Decent hand — call (or check if free)
             return call_action["action"], call_cost
 
