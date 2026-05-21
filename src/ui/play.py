@@ -1,6 +1,5 @@
 """
 ui/play.py
-----------
 Run a poker game with the pygame UI.
 
 To plug in your own agent, swap it into the agents list at the bottom.
@@ -17,10 +16,11 @@ from pypokerengine.players import BasePokerPlayer
 from pypokerengine.api.game import setup_config, start_poker
 
 from src.ui.poker_ui import PokerUI
-from src.core.card import Card, Rank, Suit
+from src.core.card import Card, Rank, Suit, Deck
 from src.core.hand_evaluator import evaluate, HandRank
+from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
 
-# ── PyPokerEngine card string  →  src.core.card.Card ─────────────────────────
+# PyPokerEngine card string  ->  src.core.card.Card
 # PyPokerEngine format is suit-first: "SA" = Ace of Spades, "H9" = Nine of Hearts
 
 _SUIT_MAP = {
@@ -63,7 +63,7 @@ def _hand_name(hole_strs: list, community_strs: list) -> str:
     return best.name.replace("_", " ").title()
 
 
-# ── Simple baseline bots ──────────────────────────────────────────────────────
+# Simple baseline bots 
 
 class RandomAgent(BasePokerPlayer):
     """Picks a random valid action."""
@@ -92,13 +92,27 @@ class CallAgent(BasePokerPlayer):
     def receive_round_result_message(self, w, h, rs): pass
 
 
-# ── Hole card registry ────────────────────────────────────────────────────────
+# Hole card registry 
 # Each agent stores its hole cards here at round start so the showdown can
 # display them. Maps player name -> list of card strings.
 _hole_card_registry: dict = {}
 
 
-# ── Human agent ───────────────────────────────────────────────────────────────
+def _ui_update(ui, hole_cards, round_state):
+    """Convenience wrapper — always passes the full hole card registry so all
+    players' cards are shown face-up during the hand."""
+    ui.update(
+        hole_cards      = hole_cards,
+        community_cards = round_state.get("community_card", []),
+        seats           = round_state.get("seats", []),
+        pot             = round_state.get("pot", {}).get("main", {}).get("amount", 0),
+        street          = round_state.get("street", "preflop"),
+        round_num       = round_state.get("round_count", 0),
+        all_hole_cards  = dict(_hole_card_registry),
+    )
+
+
+# Human agent 
 
 class HumanAgent(BasePokerPlayer):
     """Lets a human play via the pygame buttons."""
@@ -108,14 +122,7 @@ class HumanAgent(BasePokerPlayer):
         self._name = name
 
     def declare_action(self, valid_actions, hole_card, round_state):
-        self.ui.update(
-            hole_cards      = hole_card,
-            community_cards = round_state.get("community_card", []),
-            seats           = round_state.get("seats", []),
-            pot             = round_state.get("pot", {}).get("main", {}).get("amount", 0),
-            street          = round_state.get("street", "preflop"),
-            round_num       = round_state.get("round_count", 0),
-        )
+        _ui_update(self.ui, hole_card, round_state)
         self.ui.log_action("Your turn")
         return self.ui.ask_human(valid_actions)
 
@@ -135,22 +142,15 @@ class HumanAgent(BasePokerPlayer):
                 name = seat.get("name", name)
                 break
         self.ui.log_action(f"{name}: {act} {amount or ''}")
-        self.ui.update(
-            hole_cards      = [],
-            community_cards = round_state.get("community_card", []),
-            seats           = round_state.get("seats", []),
-            pot             = round_state.get("pot", {}).get("main", {}).get("amount", 0),
-            street          = round_state.get("street", "preflop"),
-            round_num       = round_state.get("round_count", 0),
-        )
+        _ui_update(self.ui, [], round_state)
         self.ui.draw()
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         winner_name = winners[0].get("name", "?") if winners else "?"
-        _show_showdown(self.ui, round_state, winner_name)
+        _show_showdown(self.ui, hand_info, round_state, winner_name)
 
 
-# ── Watcher agent ─────────────────────────────────────────────────────────────
+# Watcher agent
 
 class WatcherAgent(BasePokerPlayer):
     """
@@ -167,15 +167,9 @@ class WatcherAgent(BasePokerPlayer):
 
     def declare_action(self, valid_actions, hole_card, round_state):
         if self.is_focus:
-            self.ui.update(
-                hole_cards      = hole_card,
-                community_cards = round_state.get("community_card", []),
-                seats           = round_state.get("seats", []),
-                pot             = round_state.get("pot", {}).get("main", {}).get("amount", 0),
-                street          = round_state.get("street", "preflop"),
-                round_num       = round_state.get("round_count", 0),
-            )
+            _ui_update(self.ui, [], round_state)   # don't pass hole_card here; registry handles it
             self.ui.draw()
+            
         return self.agent.declare_action(valid_actions, hole_card, round_state)
 
     def receive_game_start_message(self, g):
@@ -186,14 +180,7 @@ class WatcherAgent(BasePokerPlayer):
         self.agent.receive_round_start_message(r, hole_card, s)
 
     def receive_street_start_message(self, s, rs):
-        self.ui.update(
-            hole_cards      = [],
-            community_cards = rs.get("community_card", []),
-            seats           = rs.get("seats", []),
-            pot             = rs.get("pot", {}).get("main", {}).get("amount", 0),
-            street          = rs.get("street", "preflop"),
-            round_num       = rs.get("round_count", 0),
-        )
+        _ui_update(self.ui, [], rs)
         self.ui.draw()
         self.agent.receive_street_start_message(s, rs)
 
@@ -211,13 +198,13 @@ class WatcherAgent(BasePokerPlayer):
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         winner_name = winners[0].get("name", "?") if winners else "?"
-        _show_showdown(self.ui, round_state, winner_name)
+        _show_showdown(self.ui, hand_info, round_state, winner_name)
         self.agent.receive_round_result_message(winners, hand_info, round_state)
 
 
-# ── Showdown ──────────────────────────────────────────────────────────────────
+# Showdown 
 
-def _show_showdown(ui, round_state, winner_name):
+def _show_showdown(ui, hand_info, round_state, winner_name):
     """
     Reveal all players' hole cards and evaluate their hands using
     src.core.hand_evaluator, then display the showdown screen.
@@ -240,7 +227,7 @@ def _show_showdown(ui, round_state, winner_name):
     ui.show_showdown(player_hands, community, winner_name, pause_seconds=4)
 
 
-# ── Game runner ───────────────────────────────────────────────────────────────
+# Game runner
 
 def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
     config = setup_config(
@@ -253,7 +240,7 @@ def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
     return start_poker(config, verbose=0)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 
 if __name__ == "__main__":
     ui = PokerUI("Texas Hold'em")
