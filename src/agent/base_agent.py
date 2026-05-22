@@ -102,6 +102,19 @@ def opponent_danger(sim_result: float):
     # convert to a 0-100 danger score: higher opponent win prob = more danger
     return (1 - sim_result) * 100
 
+# Returns Whether or not Calling would be profitable based on win percentage
+# And Pot Odds
+def check_pot_odds(call_amount: int, pot: int, win_percentage: float, street: str) -> bool:
+
+    if street.upper == "PREFLOP":
+        return True
+    print(street)
+    pot_equity = (100*call_amount) / (pot + call_amount)
+    print("pot equity : ",pot_equity)
+    if win_percentage > pot_equity:
+        return True
+    return False 
+
 RAISE_THRESHOLD  = HandRank.TWO_PAIR       # raise with two pair or better
 CALL_THRESHOLD   = HandRank.HIGH_CARD          
 DANGER_THRESHOLD = 70                      # tolerate up to 70/100 danger before folding
@@ -153,6 +166,8 @@ class SimpleAgent(BasePokerPlayer):
         )
 
         danger = opponent_danger(sim_result)
+        win_percentage = sim_result * 100
+        pot = round_state.get("pot", {}).get("main", {}).get("amount", 0)
 
         # Determine action and build a human-readable reason before acting
         if rank >= RAISE_THRESHOLD and raise_action:
@@ -161,11 +176,16 @@ class SimpleAgent(BasePokerPlayer):
                 reason = (f"Strong hand ({rank.name.replace('_',' ')}) with low danger "
                           f"({danger:.0f}/100). Raising to build pot.")
             else:
-                action, amount = call_action["action"], call_cost
-                reason = (f"Strong hand ({rank.name.replace('_',' ')}) but high danger "
-                          f"({danger:.0f}/100). Slow-playing cautiously.")
+                if (check_pot_odds(call_cost, pot, win_percentage, street )):
+                    action, amount = call_action["action"], call_cost
+                    reason = (f"Strong hand ({rank.name.replace('_',' ')}) but high danger "
+                            f"({danger:.0f}/100). Slow-playing cautiously.")
+                else:
+                    action, amount = fold_action["action"], 0
+                    reason = (f"Strong hand ({rank.name.replace('_',' ')}) but pot odds are not profitable ")
+
         elif rank >= CALL_THRESHOLD:
-            if danger < DANGER_THRESHOLD:
+            if danger < DANGER_THRESHOLD and check_pot_odds(call_cost, pot, win_percentage, street):
                 action, amount = call_action["action"], call_cost
                 reason = (f"Decent hand ({rank.name.replace('_',' ')}) with acceptable danger "
                           f"({danger:.0f}/100). Calling.")
@@ -176,8 +196,11 @@ class SimpleAgent(BasePokerPlayer):
                               f"({danger:.0f}/100). Checking for free.")
                 else:
                     action, amount = fold_action["action"], 0
-                    reason = (f"Decent hand ({rank.name.replace('_',' ')}) but danger too high "
-                              f"({danger:.0f}/100) to justify call cost of {call_cost}. Folding.")
+                    if not (check_pot_odds(call_cost, pot, win_percentage, street )):
+                        reason = (f"Decent hand ({rank.name.replace('_',' ')}) but pot odds are not profitable ")
+                    else:
+                        reason = (f"Decent hand ({rank.name.replace('_',' ')}) but danger too high "
+                                f"({danger:.0f}/100) to justify call cost of {call_cost}. Folding.")
         else:
             if call_cost == 0:
                 action, amount = call_action["action"], 0
