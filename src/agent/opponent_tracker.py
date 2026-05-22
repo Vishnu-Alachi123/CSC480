@@ -35,6 +35,7 @@ class OpponentTracker:
         if act == "fold":
             self.stats[player]["folds"] += 1
         elif act == "call":
+            
             self.stats[player]["calls"] += 1
         elif act == "raise":
             self.stats[player]["raises"] += 1
