@@ -89,3 +89,8 @@ def evaluate(cards: list[Card]) -> HandRank:
     if is_pair(cards):           return HandRank.PAIR
     return HandRank.HIGH_CARD
 
+def hand_score(cards: list[Card]) -> tuple:
+    rank = evaluate(cards)
+    counts = get_rank_count(cards)
+    tiebreakers = sorted(counts.keys(), key=lambda r: (counts[r], r), reverse=True)
+    return (rank, tiebreakers)
