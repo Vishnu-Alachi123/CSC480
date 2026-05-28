@@ -4,7 +4,7 @@ class OpponentTracker:
     def __init__(self) -> None:
         self.current_hand = defaultdict(list)
         self.stats = defaultdict(lambda: {
-            "hands_seen:": 0,
+            "hands_seen": 0,
             "folds": 0,
             "calls": 0,
             "raises": 0,
