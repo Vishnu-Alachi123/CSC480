@@ -106,7 +106,7 @@ def opponent_danger(sim_result: float):
 # And Pot Odds
 def check_pot_odds(call_amount: int, pot: int, win_percentage: float, street: str) -> bool:
 
-    if street.upper == "PREFLOP":
+    if street.upper() == "PREFLOP":
         return True
     print(street)
     pot_equity = (100*call_amount) / (pot + call_amount)
