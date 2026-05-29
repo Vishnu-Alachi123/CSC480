@@ -9,6 +9,11 @@ Decision logic:
         strong hand (Full House+) -> raise
         decent hand (Straight+) -> call
         weak hand (Two Pair-) -> fold if it costs chips, else check
+
+NEW:
+    - Uses Monte Carlo win probability
+    - Uses expected value (EV)
+    - Uses pot-aware raise sizing
 """
 
 import sys, os
@@ -88,7 +93,7 @@ def _preflop_estimate(hole_cards: list) -> HandRank:
     return HandRank.HIGH_CARD
 
 
-# Decision thresholds 
+# Decision thresholds
 #
 # Tune these to change how aggressive the agent is.
 #
@@ -102,9 +107,10 @@ def opponent_danger(sim_result: float):
     # convert to a 0-100 danger score: higher opponent win prob = more danger
     return (1 - sim_result) * 100
 
-RAISE_THRESHOLD  = HandRank.TWO_PAIR       # raise with two pair or better
-CALL_THRESHOLD   = HandRank.HIGH_CARD          
-DANGER_THRESHOLD = 70                      # tolerate up to 70/100 danger before folding
+RAISE_THRESHOLD  = HandRank.TWO_PAIR
+CALL_THRESHOLD   = HandRank.HIGH_CARD
+DANGER_THRESHOLD = 70
+
 
 class SimpleAgent(BasePokerPlayer):
     """
@@ -112,9 +118,14 @@ class SimpleAgent(BasePokerPlayer):
 
     Preflop: plays pocket pairs and high cards, folds junk
     Postflop: raises strong hands, calls decent hands, folds weak ones
+
+    NEW:
+        Uses Monte Carlo probability + expected value
+        to determine pot investment decisions.
     """
 
     def declare_action(self, valid_actions, hole_card, round_state):
+
         community = round_state.get("community_card", [])
         seats = round_state.get("seats", [])
         rank = best_hand_rank(hole_card, community)
@@ -126,15 +137,18 @@ class SimpleAgent(BasePokerPlayer):
 
         call_cost = call_action["amount"]
 
-        # parse strings -> Card objects
+        # Track current pot size so the agent can make
+        # expected value (EV) decisions.
+        pot_amount = round_state.get("pot", {}).get("main", {}).get("amount", 0)
+
         parsed_hole      = [_parse_card(c) for c in hole_card]
         parsed_community = [_parse_card(c) for c in community]
 
-        # build unseen deck 
+        # build unseen deck
         deck = Deck()
         deck.remove(parsed_hole + parsed_community)
 
-        # count active opponents 
+        # count active opponents
         num_opp = len([
             s for s in seats
             if s.get("name") != getattr(self, "_name", "")
@@ -144,6 +158,7 @@ class SimpleAgent(BasePokerPlayer):
         # run Monte Carlo simulation
         street = round_state.get("street", "preflop")
         round_num = round_state.get("round_count", 0)
+
         sim_result, current_rank, projected_rank, opp_hand_counts, player_hand_counts = monte_carlo_simulation(
             deck = deck,
             hole_cards = parsed_hole,
@@ -154,45 +169,80 @@ class SimpleAgent(BasePokerPlayer):
 
         danger = opponent_danger(sim_result)
 
-        # Determine action and build a human-readable reason before acting
-        if rank >= RAISE_THRESHOLD and raise_action:
-            if danger < 60:
-                action, amount = "raise", raise_action["amount"]["min"]
-                reason = (f"Strong hand ({rank.name.replace('_',' ')}) with low danger "
-                          f"({danger:.0f}/100). Raising to build pot.")
-            else:
-                action, amount = call_action["action"], call_cost
-                reason = (f"Strong hand ({rank.name.replace('_',' ')}) but high danger "
-                          f"({danger:.0f}/100). Slow-playing cautiously.")
-        elif rank >= CALL_THRESHOLD:
-            if danger < DANGER_THRESHOLD:
-                action, amount = call_action["action"], call_cost
-                reason = (f"Decent hand ({rank.name.replace('_',' ')}) with acceptable danger "
-                          f"({danger:.0f}/100). Calling.")
-            else:
-                if call_cost == 0:
-                    action, amount = call_action["action"], 0
-                    reason = (f"Decent hand ({rank.name.replace('_',' ')}) but high danger "
-                              f"({danger:.0f}/100). Checking for free.")
-                else:
-                    action, amount = fold_action["action"], 0
-                    reason = (f"Decent hand ({rank.name.replace('_',' ')}) but danger too high "
-                              f"({danger:.0f}/100) to justify call cost of {call_cost}. Folding.")
-        else:
-            if call_cost == 0:
-                action, amount = call_action["action"], 0
-                reason = (f"Weak hand ({rank.name.replace('_',' ')}). Checking for free.")
-            else:
-                action, amount = fold_action["action"], 0
-                reason = (f"Weak hand ({rank.name.replace('_',' ')}) with call cost {call_cost}. Folding.")
+        # Expected Value (EV)
+        lose_probability = 1 - sim_result
 
-        # Find agent's stack
+        expected_value = (
+            sim_result * pot_amount
+        ) - (
+            lose_probability * call_cost
+        )
+
+        # Find stack earlier because raise sizing now depends on it.
         agent_stack = next(
             (s.get("stack", 0) for s in seats if s.get("name") == getattr(self, "_name", "")),
             0
         )
 
-        # Print summary
+        # High EV then bigger raise
+        if expected_value > 50 and raise_action:
+
+            raise_min = raise_action["amount"]["min"]
+            raise_max = raise_action["amount"]["max"]
+
+            # Higher probability then larger raise.
+            aggression = sim_result
+
+            scaled_raise = int(
+                raise_min + (raise_max - raise_min) * aggression
+            )
+
+            # Never raise more than available chips.
+            amount = min(scaled_raise, agent_stack)
+
+            action = "raise"
+
+            reason = (
+                f"High expected value ({expected_value:.1f}) "
+                f"with win probability {sim_result * 100:.1f}%. "
+                f"Raising aggressively."
+            )
+
+        # Positive EV then call
+        elif expected_value > 0:
+
+            action = call_action["action"]
+            amount = call_cost
+
+            reason = (
+                f"Positive expected value ({expected_value:.1f}) "
+                f"with acceptable risk. Calling."
+            )
+
+        # Negative EV then fold/check
+        else:
+
+            if call_cost == 0:
+
+                action = call_action["action"]
+                amount = 0
+
+                reason = (
+                    f"Negative expected value ({expected_value:.1f}) "
+                    f"but checking is free."
+                )
+
+            else:
+
+                action = fold_action["action"]
+                amount = 0
+
+                reason = (
+                    f"Negative expected value ({expected_value:.1f}). "
+                    f"Folding to avoid losing chips."
+                )
+
+        #print summary
         print(f"\n{'='*50}")
         print(f"[Round {round_num} | {street.upper()}]")
         print(f"  Hole cards      : {hole_card}")
@@ -200,6 +250,12 @@ class SimpleAgent(BasePokerPlayer):
         print(f"  Projected hand  : {projected_rank.name.replace('_', ' ')} (most likely after board completes)")
         print(f"  Win prob        : {sim_result * 100:.1f}%")
         print(f"  Danger score    : {danger:.0f}/100")
+
+        # EV/pot tracking debug information.
+        print(f"  Pot size        : ${pot_amount:,}")
+        print(f"  Call cost       : ${call_cost:,}")
+        print(f"  Expected value  : {expected_value:.2f}")
+
         print(f"  Agent stack     : ${agent_stack:,}")
         print(f"  Decision        : {action.upper()}")
         print(f"  Reason          : {reason}")
