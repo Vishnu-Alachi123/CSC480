@@ -5,6 +5,7 @@ import random
 
 def monte_carlo_best_hand(hole_cards: list[Card],
                           community_cards: list[Card],
+                          deck: Deck,
                           num_opponents: int,
                           num_iterations: int = 1000) -> float:
     """
@@ -15,6 +16,7 @@ def monte_carlo_best_hand(hole_cards: list[Card],
     Args:
         hole_cards:      the player's two private cards
         community_cards: visible board cards (0–5)
+        deck: contains list of unseen cards
         num_opponents:   number of opponents to simulate
         num_iterations:  number of random simulations to run
 
@@ -23,30 +25,21 @@ def monte_carlo_best_hand(hole_cards: list[Card],
     """
 
     wins = 0
-    ties = 0
+
+    cards_needed = 5 - len(community_cards)
+
+    # total cards randomly drawn each simulation
+    sample_size = cards_needed + (num_opponents * 2)
 
     for _ in range(num_iterations):
-
-        # fresh deck
-        deck = Deck()
-
-        # remove known cards
-        deck.remove(hole_cards + community_cards)
-
-        # shuffle remaining deck
-        random.shuffle(deck.cards)
-
         # complete board
-        cards_needed = 5 - len(community_cards)
-        runout = community_cards + deck.cards[:cards_needed]
+        sample = random.sample(deck.cards, sample_size)
 
-        remaining = deck.cards[cards_needed:]
+        # first part of sample completes the community board
+        runout = community_cards + sample[:cards_needed]
 
-        # deal opponents
-        opponent_hands = []
-        for i in range(num_opponents):
-            opp_hole = remaining[i * 2 : i * 2 + 2]
-            opponent_hands.append(opp_hole)
+        # rest of sample is used for opponent hole cards
+        opponent_cards = sample[cards_needed:]
 
         # evaluate our best hand
         our_best = max(
@@ -58,7 +51,9 @@ def monte_carlo_best_hand(hole_cards: list[Card],
         result = "win"
         tied_opps = 0
 
-        for opp_hole in opponent_hands:
+        for i in range(num_opponents):
+            # each opponent gets 2 cards
+            opp_hole = opponent_cards[i * 2 : i * 2 + 2]
 
             opp_best = max(
                 hand_score(list(combo))
@@ -71,11 +66,11 @@ def monte_carlo_best_hand(hole_cards: list[Card],
 
             elif opp_best == our_best:
                 tied_opps += 1
-        
+
         if result != "loss":
             if tied_opps == 0:
                 wins += 1
             else:
-                ties += 1 / (1 + tied_opps)
+                wins += 1 / (1 + tied_opps)
 
-    return (wins + ties) / num_iterations
+    return wins / num_iterations
