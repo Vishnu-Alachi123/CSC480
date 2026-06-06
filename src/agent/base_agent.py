@@ -1,9 +1,13 @@
 """
-agent/base_agent.py
-Decision logic: run Monte Carlo to get win probability, then:
-  win_pct >= RAISE_WIN_PCT  →  raise
-  win_pct >= CALL_WIN_PCT   →  call (or check)
-  win_pct <  CALL_WIN_PCT   →  fold (or check for free)
+agent/base_agent.py — SimpleAgent
+Monte Carlo win-probability + OpponentTracker integration.
+
+Decision logic:
+  Base thresholds:  raise >= RAISE_WIN_PCT,  call >= CALL_WIN_PCT
+  OpponentTracker adjustments:
+    - opponents showing aggression this hand  → tighten thresholds
+    - very aggressive opponents (score > 1.5) → tighten thresholds
+    - very passive opponents   (score < 0.5)  → loosen thresholds
 """
 
 import sys, os
@@ -15,8 +19,9 @@ from src.core.card import Card, Rank, Suit, Deck
 from src.core.hand_evaluator import HandRank
 from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
 from src.core.opponent_win_probability.graph import plot_simulation_result
+from src.agent.opponent_tracker import OpponentTracker
 
-DEBUG = False  # set True to print per-decision diagnostics
+DEBUG = False  # set True for per-decision diagnostics
 
 RAISE_WIN_PCT = 60   # raise when winning > 60% of simulations
 CALL_WIN_PCT  = 40   # call  when winning > 40%; fold below (unless free)
@@ -47,7 +52,7 @@ def check_pot_odds(call_amount: int, pot: int, win_percentage: float, street: st
 
 class SimpleAgent(BasePokerPlayer):
     """
-    Monte Carlo-based poker agent.
+    Monte Carlo win-probability agent with OpponentTracker integration.
 
     Set SimpleAgent.verbose = False before benchmarking to suppress
     per-decision prints and matplotlib plots.
@@ -57,10 +62,20 @@ class SimpleAgent(BasePokerPlayer):
     def __init__(self):
         super().__init__()
         self._my_name = ""
+        self.tracker  = OpponentTracker()
 
     def receive_game_start_message(self, game_info):
-        # pypokerengine sets self.name when the player is registered
         self._my_name = getattr(self, "name", "")
+
+    def receive_round_start_message(self, round_count, hole_card, seats):
+        self.tracker.new_round()
+
+    def receive_game_update_message(self, action, round_state):
+        self.tracker.record_action(action, round_state)
+
+    def receive_round_result_message(self, winners, hand_info, round_state):
+        player_uuids = [s["uuid"] for s in round_state.get("seats", []) if "uuid" in s]
+        self.tracker.finish_round(player_uuids)
 
     def declare_action(self, valid_actions, hole_card, round_state):
         community = round_state.get("community_card", [])
@@ -79,31 +94,55 @@ class SimpleAgent(BasePokerPlayer):
         deck = Deck()
         deck.remove(parsed_hole + parsed_community)
 
-        # exclude self and eliminated players
-        num_opp = len([
+        # active opponents — exclude self and busted players
+        opp_seats = [
             s for s in seats
             if s.get("name") != self._my_name
             and s.get("state") == "participating"
-        ])
+        ]
+        num_opp = max(len(opp_seats), 1)
 
         sim_result, current_rank, projected_rank, opp_hand_counts, player_hand_counts = monte_carlo_simulation(
             deck            = deck,
             hole_cards      = parsed_hole,
             community_cards = parsed_community,
-            num_opp         = max(num_opp, 1),
+            num_opp         = num_opp,
             num_sims        = 200,
         )
 
         win_pct = sim_result * 100
         pot     = round_state.get("pot", {}).get("main", {}).get("amount", 0)
 
-        if win_pct >= RAISE_WIN_PCT and raise_action:
-            action, amount = "raise", raise_action["amount"]["min"]
-            reason = f"Win prob {win_pct:.1f}% — raising for value."
+        # ── OpponentTracker adjustment ────────────────────────────────────────
+        opp_uuids = [s.get("uuid", "") for s in opp_seats]
+        opp_aggression  = max((self.tracker.aggression_score(u) for u in opp_uuids), default=1.0)
+        opp_threatening = any(self.tracker.is_showing_strength_this_hand(u) for u in opp_uuids)
 
-        elif win_pct >= CALL_WIN_PCT or check_pot_odds(call_cost, pot, win_pct, street):
+        effective_raise_pct = RAISE_WIN_PCT
+        effective_call_pct  = CALL_WIN_PCT
+
+        if opp_threatening:
+            # Someone raised preflop AND bet the flop — treat as a strong hand
+            effective_raise_pct += 15   # need higher confidence to raise into them
+            effective_call_pct  += 10
+        elif opp_aggression > 1.5:
+            # Generally aggressive players — play tighter
+            effective_raise_pct += 10
+            effective_call_pct  +=  5
+        elif opp_aggression < 0.5:
+            # Passive players — can open up a bit
+            effective_raise_pct = max(50, RAISE_WIN_PCT - 10)
+            effective_call_pct  = max(30, CALL_WIN_PCT  - 10)
+
+        # ── Decision ─────────────────────────────────────────────────────────
+        if win_pct >= effective_raise_pct and raise_action:
+            action, amount = "raise", raise_action["amount"]["min"]
+            reason = (f"Win prob {win_pct:.1f}% ≥ {effective_raise_pct:.0f}% "
+                      f"(adj for opp aggression {opp_aggression:.2f}) — raising.")
+
+        elif win_pct >= effective_call_pct or check_pot_odds(call_cost, pot, win_pct, street):
             action, amount = call_action["action"], call_cost
-            reason = f"Win prob {win_pct:.1f}% — calling."
+            reason = (f"Win prob {win_pct:.1f}% ≥ {effective_call_pct:.0f}% — calling.")
 
         else:
             if call_cost == 0:
@@ -111,16 +150,16 @@ class SimpleAgent(BasePokerPlayer):
                 reason = f"Win prob {win_pct:.1f}% — checking for free."
             else:
                 action, amount = fold_action["action"], 0
-                reason = f"Win prob {win_pct:.1f}% — folding, not worth the cost."
+                reason = f"Win prob {win_pct:.1f}% — folding."
 
         if DEBUG:
-            print(f"[DEBUG] name={self._my_name!r}, seats={[s['name'] for s in seats]}, "
-                  f"num_opp={num_opp}, sim_result={sim_result:.3f}, action={action}")
+            print(f"[DEBUG SimpleAgent] name={self._my_name!r}, num_opp={num_opp}, "
+                  f"win_pct={win_pct:.1f}, aggression={opp_aggression:.2f}, "
+                  f"threatening={opp_threatening}, action={action}")
 
         if self.__class__.verbose:
             agent_stack = next(
-                (s.get("stack", 0) for s in seats if s.get("name") == self._my_name),
-                0
+                (s.get("stack", 0) for s in seats if s.get("name") == self._my_name), 0
             )
             print(f"\n{'='*50}")
             print(f"[Round {round_num} | {street.upper()}]")
@@ -128,6 +167,7 @@ class SimpleAgent(BasePokerPlayer):
             print(f"  Current hand    : {current_rank.name.replace('_', ' ')}")
             print(f"  Projected hand  : {projected_rank.name.replace('_', ' ')}")
             print(f"  Win prob        : {win_pct:.1f}%")
+            print(f"  Opp aggression  : {opp_aggression:.2f}  threatening={opp_threatening}")
             print(f"  Num opponents   : {num_opp}")
             print(f"  Agent stack     : ${agent_stack:,}")
             print(f"  Decision        : {action.upper()}")
@@ -150,7 +190,4 @@ class SimpleAgent(BasePokerPlayer):
 
         return action, amount
 
-    def receive_round_start_message(self, r, h, s): pass
     def receive_street_start_message(self, s, rs): pass
-    def receive_game_update_message(self, a, rs): pass
-    def receive_round_result_message(self, w, h, rs): pass
