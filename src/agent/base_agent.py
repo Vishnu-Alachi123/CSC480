@@ -1,28 +1,25 @@
 """
 agent/base_agent.py
-A simple rule-based poker agent that uses hand_evaluator
-to make decisions based on hand strength.
-
-Decision logic:
-    - Evaluate the best 5-card hand from hole cards + community cards
-    - Map the hand rank to a threshold:
-        strong hand (Full House+) -> raise
-        decent hand (Straight+) -> call
-        weak hand (Two Pair-) -> fold if it costs chips, else check
+Decision logic: run Monte Carlo to get win probability, then:
+  win_pct >= RAISE_WIN_PCT  →  raise
+  win_pct >= CALL_WIN_PCT   →  call (or check)
+  win_pct <  CALL_WIN_PCT   →  fold (or check for free)
 """
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from itertools import combinations
 from pypokerengine.players import BasePokerPlayer
 
 from src.core.card import Card, Rank, Suit, Deck
-from src.core.hand_evaluator import evaluate, HandRank
+from src.core.hand_evaluator import HandRank
 from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
 from src.core.opponent_win_probability.graph import plot_simulation_result
 
-# Card string parser (same as play.py)
+DEBUG = False  # set True to print per-decision diagnostics
+
+RAISE_WIN_PCT = 60   # raise when winning > 60% of simulations
+CALL_WIN_PCT  = 40   # call  when winning > 40%; fold below (unless free)
 
 _SUIT_MAP = {
     'S': Suit.SPADES, 'H': Suit.HEARTS,
@@ -38,216 +35,121 @@ _RANK_MAP = {
 def _parse(card_str: str) -> Card:
     return Card(_RANK_MAP[card_str[1].upper()], _SUIT_MAP[card_str[0].upper()])
 
-# alias so both names work
-_parse_card = _parse
 
-
-def best_hand_rank(hole_cards: list, community_cards: list) -> HandRank:
-    """
-    Try every 5-card combination from hole + community cards and
-    return the best HandRank using src.core.hand_evaluator.evaluate().
-    Falls back to HIGH_CARD if fewer than 5 cards are available.
-    """
-    all_cards = [_parse(c) for c in hole_cards + community_cards]
-
-    if len(all_cards) < 5:
-        # Do a rough preflop estimate based on hole card ranks instead.
-        return _preflop_estimate(hole_cards)
-
-    best = HandRank.HIGH_CARD
-    for combo in combinations(all_cards, 5):
-        result = evaluate(list(combo))
-        if result > best:
-            best = result
-    return best
-
-
-def _preflop_estimate(hole_cards: list) -> HandRank:
-    """
-    Rough preflop hand quality without community cards.
-    Pocket pair -> PAIR, high cards (A/K/Q) -> HIGH_CARD with a bump, Same suit -> FLUSH
-    everything else -> HIGH_CARD.
-    """
-    if len(hole_cards) < 2:
-        return HandRank.HIGH_CARD
-
-    r1 = _RANK_MAP[hole_cards[0][1].upper()]
-    r2 = _RANK_MAP[hole_cards[1][1].upper()]
-
-    if r1 == r2:
-        return HandRank.PAIR   # pocket pair
-
-    # Treat high-card hands (A, K, Q in hole) as slightly above HIGH_CARD
-    high_ranks = {Rank.ACE, Rank.KING, Rank.QUEEN}
-    if r1 in high_ranks or r2 in high_ranks:
-        return HandRank.HIGH_CARD  # still HIGH_CARD but caller can check rank
-
-    if _SUIT_MAP[hole_cards[0][0]] == _SUIT_MAP[hole_cards[1][0]]:
-        return HandRank.FLUSH
-
-    return HandRank.HIGH_CARD
-
-
-# Decision thresholds 
-#
-# Tune these to change how aggressive the agent is.
-#
-#   RAISE_THRESHOLD — hand rank at or above this -> raise
-#   CALL_THRESHOLD — hand rank at or above this -> call
-#   below CALL_THRESHOLD -> fold (or check if free)
-
-
-def opponent_danger(sim_result: float):
-    # sim_result is now a win probability (0.0 to 1.0)
-    # convert to a 0-100 danger score: higher opponent win prob = more danger
-    return (1 - sim_result) * 100
-
-# Returns Whether or not Calling would be profitable based on win percentage
-# And Pot Odds
 def check_pot_odds(call_amount: int, pot: int, win_percentage: float, street: str) -> bool:
-
     if street.upper() == "PREFLOP":
         return True
-    print(street)
-    pot_equity = (100*call_amount) / (pot + call_amount)
-    print("pot equity : ",pot_equity)
-    if win_percentage > pot_equity:
+    if pot + call_amount == 0:
         return True
-    return False 
+    pot_equity = (100 * call_amount) / (pot + call_amount)
+    return win_percentage > pot_equity
 
-RAISE_THRESHOLD  = HandRank.TWO_PAIR       # raise with two pair or better
-CALL_THRESHOLD   = HandRank.HIGH_CARD          
-DANGER_THRESHOLD = 70                      # tolerate up to 70/100 danger before folding
 
 class SimpleAgent(BasePokerPlayer):
     """
-    Rule-based agent that uses hand_evaluator to decide actions.
+    Monte Carlo-based poker agent.
 
-    Preflop: plays pocket pairs and high cards, folds junk
-    Postflop: raises strong hands, calls decent hands, folds weak ones
+    Set SimpleAgent.verbose = False before benchmarking to suppress
+    per-decision prints and matplotlib plots.
     """
+    verbose = True
+
+    def __init__(self):
+        super().__init__()
+        self._my_name = ""
+
+    def receive_game_start_message(self, game_info):
+        # pypokerengine sets self.name when the player is registered
+        self._my_name = getattr(self, "name", "")
 
     def declare_action(self, valid_actions, hole_card, round_state):
         community = round_state.get("community_card", [])
-        seats = round_state.get("seats", [])
-        rank = best_hand_rank(hole_card, community)
+        seats     = round_state.get("seats", [])
+        street    = round_state.get("street", "preflop")
+        round_num = round_state.get("round_count", 0)
 
-        # valid_actions is always [fold, call, raise]
         fold_action  = valid_actions[0]
         call_action  = valid_actions[1]
         raise_action = valid_actions[2] if len(valid_actions) > 2 else None
+        call_cost    = call_action["amount"]
 
-        call_cost = call_action["amount"]
+        parsed_hole      = [_parse(c) for c in hole_card]
+        parsed_community = [_parse(c) for c in community]
 
-        # parse strings -> Card objects
-        parsed_hole      = [_parse_card(c) for c in hole_card]
-        parsed_community = [_parse_card(c) for c in community]
-
-        # build unseen deck 
         deck = Deck()
         deck.remove(parsed_hole + parsed_community)
 
-        # count active opponents 
+        # exclude self and eliminated players
         num_opp = len([
             s for s in seats
-            if s.get("name") != getattr(self, "_name", "")
+            if s.get("name") != self._my_name
             and s.get("state") == "participating"
         ])
 
-        # run Monte Carlo simulation
-        street = round_state.get("street", "preflop")
-        round_num = round_state.get("round_count", 0)
         sim_result, current_rank, projected_rank, opp_hand_counts, player_hand_counts = monte_carlo_simulation(
-            deck = deck,
-            hole_cards = parsed_hole,
+            deck            = deck,
+            hole_cards      = parsed_hole,
             community_cards = parsed_community,
-            num_opp = max(num_opp, 1),
-            num_sims = 500,
+            num_opp         = max(num_opp, 1),
+            num_sims        = 200,
         )
 
-        danger = opponent_danger(sim_result)
-        win_percentage = sim_result * 100
-        pot = round_state.get("pot", {}).get("main", {}).get("amount", 0)
+        win_pct = sim_result * 100
+        pot     = round_state.get("pot", {}).get("main", {}).get("amount", 0)
 
-        # Determine action and build a human-readable reason before acting
-        if rank >= RAISE_THRESHOLD and raise_action:
-            if danger < 60:
-                action, amount = "raise", raise_action["amount"]["min"]
-                reason = (f"Strong hand ({rank.name.replace('_',' ')}) with low danger "
-                          f"({danger:.0f}/100). Raising to build pot.")
-            else:
-                if (check_pot_odds(call_cost, pot, win_percentage, street )):
-                    action, amount = call_action["action"], call_cost
-                    reason = (f"Strong hand ({rank.name.replace('_',' ')}) but high danger "
-                            f"({danger:.0f}/100). Slow-playing cautiously.")
-                else:
-                    action, amount = fold_action["action"], 0
-                    reason = (f"Strong hand ({rank.name.replace('_',' ')}) but pot odds are not profitable ")
+        if win_pct >= RAISE_WIN_PCT and raise_action:
+            action, amount = "raise", raise_action["amount"]["min"]
+            reason = f"Win prob {win_pct:.1f}% — raising for value."
 
-        elif rank >= CALL_THRESHOLD:
-            if danger < DANGER_THRESHOLD and check_pot_odds(call_cost, pot, win_percentage, street):
-                action, amount = call_action["action"], call_cost
-                reason = (f"Decent hand ({rank.name.replace('_',' ')}) with acceptable danger "
-                          f"({danger:.0f}/100). Calling.")
-            else:
-                if call_cost == 0:
-                    action, amount = call_action["action"], 0
-                    reason = (f"Decent hand ({rank.name.replace('_',' ')}) but high danger "
-                              f"({danger:.0f}/100). Checking for free.")
-                else:
-                    action, amount = fold_action["action"], 0
-                    if not (check_pot_odds(call_cost, pot, win_percentage, street )):
-                        reason = (f"Decent hand ({rank.name.replace('_',' ')}) but pot odds are not profitable ")
-                    else:
-                        reason = (f"Decent hand ({rank.name.replace('_',' ')}) but danger too high "
-                                f"({danger:.0f}/100) to justify call cost of {call_cost}. Folding.")
+        elif win_pct >= CALL_WIN_PCT or check_pot_odds(call_cost, pot, win_pct, street):
+            action, amount = call_action["action"], call_cost
+            reason = f"Win prob {win_pct:.1f}% — calling."
+
         else:
             if call_cost == 0:
                 action, amount = call_action["action"], 0
-                reason = (f"Weak hand ({rank.name.replace('_',' ')}). Checking for free.")
+                reason = f"Win prob {win_pct:.1f}% — checking for free."
             else:
                 action, amount = fold_action["action"], 0
-                reason = (f"Weak hand ({rank.name.replace('_',' ')}) with call cost {call_cost}. Folding.")
+                reason = f"Win prob {win_pct:.1f}% — folding, not worth the cost."
 
-        # Find agent's stack
-        agent_stack = next(
-            (s.get("stack", 0) for s in seats if s.get("name") == getattr(self, "_name", "")),
-            0
-        )
+        if DEBUG:
+            print(f"[DEBUG] name={self._my_name!r}, seats={[s['name'] for s in seats]}, "
+                  f"num_opp={num_opp}, sim_result={sim_result:.3f}, action={action}")
 
-        # Print summary
-        print(f"\n{'='*50}")
-        print(f"[Round {round_num} | {street.upper()}]")
-        print(f"  Hole cards      : {hole_card}")
-        print(f"  Current hand    : {current_rank.name.replace('_', ' ')}")
-        print(f"  Projected hand  : {projected_rank.name.replace('_', ' ')} (most likely after board completes)")
-        print(f"  Win prob        : {sim_result * 100:.1f}%")
-        print(f"  Danger score    : {danger:.0f}/100")
-        print(f"  Agent stack     : ${agent_stack:,}")
-        print(f"  Decision        : {action.upper()}")
-        print(f"  Reason          : {reason}")
-        print(f"{'='*50}\n")
+        if self.__class__.verbose:
+            agent_stack = next(
+                (s.get("stack", 0) for s in seats if s.get("name") == self._my_name),
+                0
+            )
+            print(f"\n{'='*50}")
+            print(f"[Round {round_num} | {street.upper()}]")
+            print(f"  Hole cards      : {hole_card}")
+            print(f"  Current hand    : {current_rank.name.replace('_', ' ')}")
+            print(f"  Projected hand  : {projected_rank.name.replace('_', ' ')}")
+            print(f"  Win prob        : {win_pct:.1f}%")
+            print(f"  Num opponents   : {num_opp}")
+            print(f"  Agent stack     : ${agent_stack:,}")
+            print(f"  Decision        : {action.upper()}")
+            print(f"  Reason          : {reason}")
+            print(f"{'='*50}\n")
 
-        # Plot and pause for analysis
-        plot_simulation_result(
-            opp_hand_counts    = opp_hand_counts,
-            player_rank        = projected_rank,
-            win_probability    = sim_result,
-            street             = street,
-            round_num          = round_num,
-            hole_cards         = hole_card,
-            decision           = action,
-            decision_reason    = reason,
-            agent_stack        = agent_stack,
-            current_rank       = current_rank,
-            player_hand_counts = player_hand_counts,
-        )
-
-        input(" Press Enter to continue...\n")
+            plot_simulation_result(
+                opp_hand_counts    = opp_hand_counts,
+                player_rank        = projected_rank,
+                win_probability    = sim_result,
+                street             = street,
+                round_num          = round_num,
+                hole_cards         = hole_card,
+                decision           = action,
+                decision_reason    = reason,
+                agent_stack        = agent_stack,
+                current_rank       = current_rank,
+                player_hand_counts = player_hand_counts,
+            )
 
         return action, amount
 
-    def receive_game_start_message(self, g): pass
     def receive_round_start_message(self, r, h, s): pass
     def receive_street_start_message(self, s, rs): pass
     def receive_game_update_message(self, a, rs): pass
