@@ -22,6 +22,7 @@ from pypokerengine.players import BasePokerPlayer
 from src.core.card import Card, Rank, Suit, Deck
 from src.core.hand_evaluator import HandRank, evaluate
 from src.core.best_hand_probability.mc_besthand import monte_carlo_best_hand
+from src.core.opponent_win_probability.graph import plot_simulation_result
 from src.agent.opponent_tracker import OpponentTracker
 from itertools import combinations
 
@@ -183,16 +184,33 @@ class PokerAgent(BasePokerPlayer):
             agent_stack = next(
                 (s.get("stack", 0) for s in seats if s.get("name") == self._my_name), 0
             )
-            print(f"\n{'='*52}")
-            print(f"[PokerAgent | Round {round_num} | {street.upper()}]")
-            print(f"  Hole     : {hole_card}")
-            print(f"  Hand     : {rank.name.replace('_',' ')}")
-            print(f"  Win prob : {win_pct:.1f}%   Danger: {danger:.0f}/100")
-            print(f"  Opp agg  : {opp_aggression:.2f}   Threatening: {opp_threatening}")
-            print(f"  Stack    : ${agent_stack:,}")
-            print(f"  Decision : {action.upper()}")
-            print(f"  Reason   : {reason}")
-            print(f"{'='*52}\n")
+            pot_size  = round_state.get("pot", {}).get("main", {}).get("amount", 0)
+
+            # build opponent tracker info for graph: (display_name, aggression, threatening)
+            opp_tracker_info = []
+            for s in opp_seats:
+                uuid = s.get("uuid", "")
+                name = s.get("name", uuid[:8])
+                agg  = self.tracker.aggression_score(uuid)
+                thr  = self.tracker.is_showing_strength_this_hand(uuid)
+                opp_tracker_info.append((name, agg, thr))
+
+            plot_simulation_result(
+                opp_hand_counts    = {},          # mc_besthand doesn't track opp distributions
+                player_rank        = rank,
+                win_probability    = win_prob,
+                street             = street,
+                round_num          = round_num,
+                hole_cards         = hole_card,
+                decision           = action,
+                decision_reason    = reason,
+                agent_stack        = agent_stack,
+                current_rank       = rank,
+                player_hand_counts = {},
+                opp_tracker_info   = opp_tracker_info,
+                pot_size           = pot_size,
+                call_cost          = call_cost,
+            )
 
         return action, amount
 
