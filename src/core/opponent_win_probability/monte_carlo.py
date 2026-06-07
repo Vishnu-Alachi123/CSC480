@@ -31,11 +31,12 @@ def monte_carlo_simulation(
     """
     assert len(hole_cards) == 2, f"Expected 2 hole cards, got {len(hole_cards)}"
     assert len(community_cards) in (0, 3, 4, 5), f"Expected 0/3/4/5 community cards, got {len(community_cards)}"
-    assert 1 <= num_opp <= 8, f"Expected 1–8 opponents, got {num_opp}"
+    assert 1 <= num_opp <= 22, f"Expected 1–22 opponents, got {num_opp}"
+    num_opp = min(num_opp, 8)   # cap sims at 8 opponents; more gives diminishing returns
 
     # more sims at preflop where there is the most uncertainty
     if len(community_cards) == 0:
-        num_sims = max(num_sims, 500)
+        num_sims = max(num_sims, 300)
 
     board_cards_needed = 5 - len(community_cards)
     deck_cards = deck.cards

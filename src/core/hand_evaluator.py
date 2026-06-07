@@ -75,3 +75,16 @@ def evaluate(cards: list[Card]) -> HandRank:
         return HandRank.PAIR
 
     return HandRank.HIGH_CARD
+
+
+def hand_score(cards: list[Card]) -> tuple:
+    """Return (HandRank, tiebreaker_list) for kicker-aware comparison.
+    Tiebreakers are sorted by (count, rank) descending so the dominant
+    rank group comes first (e.g. trips before the pair in a full house).
+    """
+    rank = evaluate(cards)
+    counts: dict[int, int] = {}
+    for card in cards:
+        counts[card.rank.value] = counts.get(card.rank.value, 0) + 1
+    tiebreakers = sorted(counts.keys(), key=lambda r: (counts[r], r), reverse=True)
+    return (rank, tiebreakers)
