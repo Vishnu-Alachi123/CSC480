@@ -20,9 +20,6 @@ from src.core.card import Card, Rank, Suit, Deck
 from src.core.hand_evaluator import evaluate, HandRank
 from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
 
-# PyPokerEngine card string  ->  src.core.card.Card
-# PyPokerEngine format is suit-first: "SA" = Ace of Spades, "H9" = Nine of Hearts
-
 _SUIT_MAP = {
     'S': Suit.SPADES,
     'H': Suit.HEARTS,
@@ -92,15 +89,24 @@ class CallAgent(BasePokerPlayer):
     def receive_round_result_message(self, w, h, rs): pass
 
 
-# Hole card registry 
-# Each agent stores its hole cards here at round start so the showdown can
-# display them. Maps player name -> list of card strings.
+# Hole card registry
+# All agents store their cards here at round start so the showdown can reveal them.
+# Maps player name -> list of card strings.
 _hole_card_registry: dict = {}
+
+# Players whose cards are hidden face-down during live play (AI agents).
+# Their cards are still stored in the registry and revealed at showdown.
+_hidden_during_hand: set = set()
 
 
 def _ui_update(ui, hole_cards, round_state):
-    """Convenience wrapper — always passes the full hole card registry so all
-    players' cards are shown face-up during the hand."""
+    """Update the UI. AI agents' cards are hidden during the hand (shown only at showdown)."""
+    # only show cards for players NOT in the hidden set (i.e. the human player)
+    visible_cards = {
+        name: cards
+        for name, cards in _hole_card_registry.items()
+        if name not in _hidden_during_hand
+    }
     ui.update(
         hole_cards      = hole_cards,
         community_cards = round_state.get("community_card", []),
@@ -108,7 +114,7 @@ def _ui_update(ui, hole_cards, round_state):
         pot             = round_state.get("pot", {}).get("main", {}).get("amount", 0),
         street          = round_state.get("street", "preflop"),
         round_num       = round_state.get("round_count", 0),
-        all_hole_cards  = dict(_hole_card_registry),
+        all_hole_cards  = visible_cards,
     )
 
 
@@ -165,18 +171,24 @@ class WatcherAgent(BasePokerPlayer):
         self._name    = name
         self.is_focus = is_focus
 
+    def set_uuid(self, uuid):
+        # pypokerengine sets uuid on the wrapper but the inner agent also needs it
+        # so that receive_game_start_message can look up its own name from game_info
+        super().set_uuid(uuid)
+        self.agent.set_uuid(uuid)
+
     def declare_action(self, valid_actions, hole_card, round_state):
         if self.is_focus:
-            _ui_update(self.ui, [], round_state)   # don't pass hole_card here; registry handles it
+            _ui_update(self.ui, [], round_state)
             self.ui.draw()
-            
         return self.agent.declare_action(valid_actions, hole_card, round_state)
 
     def receive_game_start_message(self, g):
         self.agent.receive_game_start_message(g)
 
     def receive_round_start_message(self, r, hole_card, s):
-        _hole_card_registry[self._name] = hole_card
+        _hole_card_registry[self._name] = hole_card   # kept for showdown reveal
+        _hidden_during_hand.add(self._name)            # hidden face-down during play
         self.agent.receive_round_start_message(r, hole_card, s)
 
     def receive_street_start_message(self, s, rs):
@@ -245,10 +257,10 @@ def run_with_ui(agents, max_rounds=15, initial_stack=1000, small_blind=10):
 if __name__ == "__main__":
     ui = PokerUI("Texas Hold'em")
 
-    from src.agent.base_agent import SimpleAgent
+    from src.agent.poker_agent import PokerAgent
     agents = [
-        ("You",       HumanAgent(ui, name="You")),
-        ("SimpleAgent", WatcherAgent(ui, SimpleAgent(), name="SimpleAgent", is_focus=True))
+        ("You",         HumanAgent(ui, name="You")),
+        ("PokerAgent",  WatcherAgent(ui, PokerAgent(), name="PokerAgent", is_focus=True))
     ]
 
     result = run_with_ui(agents)

@@ -20,10 +20,7 @@ _WHEEL = frozenset({14, 2, 3, 4, 5})
 
 
 def evaluate(cards: list[Card]) -> HandRank:
-    """
-    Evaluate a 5-card hand in a single pass.
-    Computes flush, straight, and rank counts once, then maps to HandRank.
-    """
+    # evaluates a 5-card hand in one pass, computing flush, straight, and rank counts
     ranks = [card.rank.value for card in cards]
     suits = [card.suit for card in cards]
 
@@ -78,10 +75,8 @@ def evaluate(cards: list[Card]) -> HandRank:
 
 
 def hand_score(cards: list[Card]) -> tuple:
-    """Return (HandRank, tiebreaker_list) for kicker-aware comparison.
-    Tiebreakers are sorted by (count, rank) descending so the dominant
-    rank group comes first (e.g. trips before the pair in a full house).
-    """
+    # returns (HandRank, tiebreaker_list) for kicker comparison. tiebreakers sorted by
+    # (count, rank) descending so the dominant group comes first, e.g. trips before the pair.
     rank = evaluate(cards)
     counts: dict[int, int] = {}
     for card in cards:

@@ -23,12 +23,7 @@ def monte_carlo_simulation(
     num_sims: int = 200,
     workers=None,  # kept for backwards compat, ignored
 ) -> tuple:
-    """
-    Run Monte Carlo simulations to estimate win probability.
-
-    Returns:
-        (win_probability, current_rank, projected_rank, opp_hand_counts, player_rank_counts)
-    """
+    # runs MC sims to figure out how likely we are to win against however many opponents are left.
     assert len(hole_cards) == 2, f"Expected 2 hole cards, got {len(hole_cards)}"
     assert len(community_cards) in (0, 3, 4, 5), f"Expected 0/3/4/5 community cards, got {len(community_cards)}"
     assert 1 <= num_opp <= 22, f"Expected 1–22 opponents, got {num_opp}"
@@ -53,7 +48,7 @@ def monte_carlo_simulation(
     opp_hand_counts: dict = defaultdict(int)
     player_rank_counts: dict = defaultdict(int)
 
-    # ── River: board is complete ──────────────────────────────────────────────
+    # river case - board is complete so we enumerate or sample opponent hands directly
     if board_cards_needed == 0:
         projected_rank = current_rank
         num_combos = comb(len(deck_cards), 2 * num_opp)
@@ -99,7 +94,7 @@ def monte_carlo_simulation(
 
         return win_probability, current_rank, projected_rank, opp_hand_counts, {}
 
-    # ── Pre-river: single-threaded Monte Carlo ────────────────────────────────
+    # pre-river: randomly complete the board and deal opponent cards each sim
     cards_needed = (num_opp * 2) + board_cards_needed
 
     for _ in range(num_sims):

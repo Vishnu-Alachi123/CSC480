@@ -1,9 +1,8 @@
-from itertools import combinations
 from pypokerengine.players import BasePokerPlayer
 from src.core.card import Card, Rank, Suit, Deck
-from src.core.hand_evaluator import HandRank, evaluate
+from src.core.hand_evaluator import HandRank
 from src.core.opponent_win_probability.monte_carlo import monte_carlo_simulation
-from src.core.pot_tracker import PotTracker
+from src.core.opponent_tracker import OpponentTracker
 
 SUIT_MAP = {'S': Suit.SPADES, 'H': Suit.HEARTS, 'D': Suit.DIAMONDS, 'C': Suit.CLUBS}
 RANK_MAP = {
@@ -15,29 +14,33 @@ RANK_MAP = {
 def parse_card(card_str):
     return Card(RANK_MAP[card_str[1].upper()], SUIT_MAP[card_str[0].upper()])
 
-def best_hand_rank(parsed_hole, parsed_community):
-    all_cards = parsed_hole + parsed_community
-    if len(all_cards) < 5:
-        if len(all_cards) >= 2 and all_cards[0].rank == all_cards[1].rank:
-            return HandRank.PAIR
-        return HandRank.HIGH_CARD
-    return max(evaluate(list(c)) for c in combinations(all_cards, 5))
-
-DANGER_FOLD_THRESHOLD = 65
+RAISE_WIN_PCT = 60
+CALL_WIN_PCT = 40
 
 
-class MCDangerAgent(BasePokerPlayer):
-    # MC plus a danger score. danger is just 1 - win_probability so when we're losing
-    # most sims we treat it as high danger and fold hands that might technically be
-    # worth calling on pot odds alone.
+class MCBehaviorAgent(BasePokerPlayer):
+    # MC sims combined with opponent tracking. if someone's been aggressive or is
+    # showing strength this hand we tighten up our thresholds, and against passive
+    # tables we loosen them a bit.
+    verbose = True
 
     def __init__(self):
         super().__init__()
         self.my_name = ""
-        self.pot_stats = PotTracker()
+        self.tracker = OpponentTracker()
 
     def receive_game_start_message(self, game_info):
         self.my_name = next((s["name"] for s in game_info.get("seats", []) if s.get("uuid") == self.uuid), "")
+
+    def receive_round_start_message(self, round_count, hole_card, seats):
+        self.tracker.new_round()
+
+    def receive_game_update_message(self, action, round_state):
+        self.tracker.record_action(action, round_state)
+
+    def receive_round_result_message(self, winners, hand_info, round_state):
+        all_uuids = [s["uuid"] for s in round_state.get("seats", []) if "uuid" in s]
+        self.tracker.finish_round(all_uuids)
 
     def declare_action(self, valid_actions, hole_card, round_state):
         community_cards = round_state.get("community_card", [])
@@ -62,26 +65,31 @@ class MCDangerAgent(BasePokerPlayer):
             num_opp=num_opponents,
             num_sims=150,
         )
-        danger_score = self.pot_stats.danger_score(win_probability)
-        hand_rank = best_hand_rank(hole, board)
+        win_pct = win_probability * 100
 
-        if hand_rank >= HandRank.FULL_HOUSE:
-            if raise_action:
-                return "raise", raise_action["amount"]["min"]
-            return call_action["action"], call_cost
+        opponent_uuids = [s.get("uuid", "") for s in active_opponents]
+        max_aggression = max((self.tracker.aggression_score(u) for u in opponent_uuids), default=1.0)
+        opponent_is_scary = any(self.tracker.is_showing_strength_this_hand(u) for u in opponent_uuids)
 
-        if hand_rank >= HandRank.TWO_PAIR and raise_action:
-            if danger_score < 60:
-                return "raise", raise_action["amount"]["min"]
-            return call_action["action"], call_cost
+        raise_threshold = RAISE_WIN_PCT
+        call_threshold = CALL_WIN_PCT
 
-        if danger_score < DANGER_FOLD_THRESHOLD:
+        if opponent_is_scary:
+            raise_threshold += 15
+            call_threshold += 10
+        elif max_aggression > 1.5:
+            raise_threshold += 10
+            call_threshold += 5
+        elif max_aggression < 0.5:
+            raise_threshold = max(50, RAISE_WIN_PCT - 10)
+            call_threshold = max(30, CALL_WIN_PCT - 10)
+
+        if win_pct >= raise_threshold and raise_action:
+            return "raise", raise_action["amount"]["min"]
+        if win_pct >= call_threshold:
             return call_action["action"], call_cost
         if call_cost == 0:
             return call_action["action"], 0
         return fold_action["action"], 0
 
-    def receive_round_start_message(self, r, h, s): pass
     def receive_street_start_message(self, s, rs): pass
-    def receive_game_update_message(self, a, rs): pass
-    def receive_round_result_message(self, w, h, rs): pass

@@ -9,21 +9,9 @@ def monte_carlo_best_hand(hole_cards: list,
                           num_opponents: int,
                           num_iterations: int = 200,
                           remaining_cards: list = None) -> float:
-    """
-    Estimate win probability using kicker-aware Monte Carlo simulation.
-    Uses hand_score() for tiebreaking so identical hand ranks are resolved
-    correctly by kicker (e.g. A-high flush beats K-high flush).
-
-    Args:
-        hole_cards:       the player's two private Card objects
-        community_cards:  visible board Card objects (0-5)
-        num_opponents:    number of active opponents (capped internally at 8)
-        num_iterations:   random simulations to run
-        remaining_cards:  pre-filtered deck cards (if None, a fresh deck is built)
-
-    Returns:
-        float in [0.0, 1.0]; ties counted as partial credit 1/(1+tied_opps)
-    """
+    # same idea as the main MC but uses hand_score instead of just HandRank so kickers
+    # actually matter, an ace-high flush beats a king-high flush properly here. ties
+    # get partial credit (1 / 1+tied opponents) instead of counting as a full win or loss.
     if remaining_cards is None:
         from src.core.card import Deck
         d = Deck()
