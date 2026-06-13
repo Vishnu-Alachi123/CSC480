@@ -58,24 +58,30 @@ class PokerUI:
         self.font_sm  = pygame.font.SysFont("Arial", 14)
 
         # State — set by update()
-        self.hole_cards  = []
-        self.community   = []
-        self.seats       = []
-        self.pot         = 0
-        self.street      = "preflop"
-        self.round_num   = 0
-        self.log         = []          # list of action strings
+        self.hole_cards     = []
+        self.community      = []
+        self.seats          = []
+        self.pot            = 0
+        self.street         = "preflop"
+        self.round_num      = 0
+        self.all_hole_cards = {}   # {name: [card_str, card_str]} — shown face-up if set
+        self.log            = []   # list of action strings
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def update(self, hole_cards, community_cards, seats, pot, street, round_num):
-        """Push the latest game state. Call this whenever something changes."""
-        self.hole_cards = hole_cards
-        self.community  = community_cards
-        self.seats      = seats
-        self.pot        = pot
-        self.street     = street
-        self.round_num  = round_num
+    def update(self, hole_cards, community_cards, seats, pot, street, round_num, all_hole_cards=None):
+        """Push the latest game state. Call this whenever something changes.
+        
+        all_hole_cards: optional dict of {player_name: [card_str, card_str]}
+                        if provided, all players' cards are shown face-up.
+        """
+        self.hole_cards     = hole_cards
+        self.community      = community_cards
+        self.seats          = seats
+        self.pot            = pot
+        self.street         = street
+        self.round_num      = round_num
+        self.all_hole_cards = all_hole_cards or {}
 
     def log_action(self, message):
         """Add a line to the on-screen action log (last 8 shown)."""
@@ -301,7 +307,7 @@ class PokerUI:
             name   = seat.get("name", f"P{i}")
             stack  = seat.get("stack", 0)
             active = seat.get("state") == "participating"
-            is_me  = i == 0   # seat 0 is always the focus player
+            is_me  = name == "You"   # highlight the human player's seat
 
             # Name + stack label
             color = GOLD if is_me else (WHITE if active else GREY)
@@ -315,6 +321,10 @@ class PokerUI:
             card_y = py - CARD_H // 2
             if is_me and self.hole_cards:
                 for j, card in enumerate(self.hole_cards):
+                    self._draw_card(card_x + j * (CARD_W + 4), card_y, card, face_up=True)
+            elif name in self.all_hole_cards:
+                # Show this player's cards face-up from the registry
+                for j, card in enumerate(self.all_hole_cards[name]):
                     self._draw_card(card_x + j * (CARD_W + 4), card_y, card, face_up=True)
             elif active:
                 for j in range(2):
