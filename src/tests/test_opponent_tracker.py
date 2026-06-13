@@ -1,4 +1,4 @@
-from src.agent.opponent_tracker import OpponentTracker
+from src.core.opponent_tracker import OpponentTracker
 
 def test_tracks_preflop_raise_and_flop_bet():
     tracker = OpponentTracker()
